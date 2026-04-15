@@ -1,0 +1,56 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "MSAnalyzer"
+version = "0.2.1"
+description = "State-of-the-art mass spectrometry & chemoinformatics toolkit with hierarchical structural analysis and fingerprint ensembles"
+readme = "README.md"
+authors = [{name = "Triston Groff", email = "tristongroff@mac.dhcp.wustl.edu"}]
+license = {text = "MIT"}
+requires-python = ">=3.10"
+keywords = ["mass-spectrometry", "chemoinformatics", "rdkit", "spectral-similarity", "structural-analysis"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "rdkit>=2024.09.1",
+    "scipy>=1.16",
+    "scikit-learn>=1.5",
+    "ms_entropy>=1.0",
+    "joblib",
+    "psutil",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.9", "seaborn>=0.13"]
+jupyter = ["jupyterlab>=4.4", "ipywidgets>=8.1", "notebook>=7.4"]
+dev = [
+    "black",
+    "ruff",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/MSAnalyzer"
+Repository = "https://github.com/yourusername/MSAnalyzer"
+Issues = "https://github.com/yourusername/MSAnalyzer/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"MSAnalyzer" = ["*.csv", "*.msp", "tests/data/*"]
