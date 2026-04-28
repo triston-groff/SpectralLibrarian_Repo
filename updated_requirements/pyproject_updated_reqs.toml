@@ -4,11 +4,11 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "MSAnalyzer"
+name = "SpectralLibrarian"
 version = "0.2.1"
 description = "State-of-the-art mass spectrometry & chemoinformatics toolkit with hierarchical structural analysis and fingerprint ensembles"
 readme = "README.md"
-authors = [{name = "Triston Groff", email = "tristongroff@mac.dhcp.wustl.edu"}]
+authors = [{name = "Triston Groff", email = "triston.groff@gmail.com"}, {name = "Yunwon Kang", email = "ywkang1221@gmail.com"}]
 license = {text = "MIT"}
 requires-python = ">=3.10"
 keywords = ["mass-spectrometry", "chemoinformatics", "rdkit", "spectral-similarity", "structural-analysis"]
@@ -53,12 +53,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/triston-groff/MSAnalyzer"
-Repository = "https://github.com/triston-groff/MSAnalyzer"
-Issues = "https://github.com/triston-groff/MSAnalyzer/issues"
+Homepage = "https://github.com/triston-groff/SpectralLibrarian_Repo"
+Repository = "https://github.com/triston-groff/SpectralLibrarian_Repo"
+Issues = "https://github.com/triston-groff/SpectralLibrarian_Repo/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"MSAnalyzer" = ["*.csv", "*.msp", "tests/data/*"]
+"SpectralLibrarian" = ["*.csv", "*.msp", "tests/data/*"]
