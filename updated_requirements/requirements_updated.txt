@@ -1,4 +1,4 @@
-# MSAnalyzer - Core dependencies (Python 3.12)
+# SpectralLibrarian - Core dependencies (Python 3.12)
 # Install with: pip install -r requirements.txt && pip install -e .
 
 joblib==1.5.2
