@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SpectralLibrarian"
-version = "0.2.1"
+dynamic = ["version"]
 description = "State-of-the-art mass spectrometry & chemoinformatics toolkit with hierarchical structural analysis and fingerprint ensembles"
 readme = "README.md"
 authors = [{name = "Triston Groff", email = "triston.groff@gmail.com"}, {name = "Yunwon Kang", email = "ywkang1221@gmail.com"}]
@@ -53,6 +53,9 @@ dev = [
     "pytest-cov>=5.0.0",
     "pre-commit>=3.8.0",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "SpectralLibrarian.__version__" }
 
 [project.urls]
 Homepage = "https://github.com/triston-groff/SpectralLibrarian_Repo"
