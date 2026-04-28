@@ -4,53 +4,63 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "MSAnalyzer"
+name = "SpectralLibrarian"
 version = "0.2.1"
 description = "State-of-the-art mass spectrometry & chemoinformatics toolkit with hierarchical structural analysis and fingerprint ensembles"
 readme = "README.md"
-authors = [{name = "Triston Groff", email = "tristongroff@mac.dhcp.wustl.edu"}]
+authors = [{name = "Triston Groff", email = "triston.groff@gmail.com"}, {name = "Yunwon Kang", email = "ywkang1221@gmail.com"}]
 license = {text = "MIT"}
 requires-python = ">=3.10"
 keywords = ["mass-spectrometry", "chemoinformatics", "rdkit", "spectral-similarity", "structural-analysis"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
 
+# === CORE DEPENDENCIES (updated April 2026) ===
 dependencies = [
-    "numpy>=2.0",
-    "pandas>=2.2",
-    "rdkit>=2024.09.1",
-    "scipy>=1.16",
-    "scikit-learn>=1.5",
-    "ms_entropy>=1.0",
-    "joblib",
-    "psutil",
-    "tqdm",
+    "joblib>=1.5.0",
+    "matchms>=0.31.0",
+    "ms_entropy>=1.3.9",
+    "numpy>=2.3.5",
+    "pandas>=2.2.3",
+    "psutil>=7.0.0",
+    "pubchempy>=1.0.5",
+    "pyteomics>=4.7.5",
+    "rdkit>=2025.9.1",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.16.1",
+    "SpectralEntropy>=1.0.0",          # ← corrected name (original or e-stan fork)
+    "tqdm>=4.67.1",
+    "matplotlib>=3.9",
+    "seaborn>=0.13"
 ]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.9", "seaborn>=0.13"]
 jupyter = ["jupyterlab>=4.4", "ipywidgets>=8.1", "notebook>=7.4"]
 dev = [
-    "black",
-    "ruff",
-    "mypy",
-    "pytest",
-    "pytest-cov",
-    "pre-commit",
+    "black>=24.8.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "pytest>=8.4.0",
+    "pytest-cov>=5.0.0",
+    "pre-commit>=3.8.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/MSAnalyzer"
-Repository = "https://github.com/yourusername/MSAnalyzer"
-Issues = "https://github.com/yourusername/MSAnalyzer/issues"
+Homepage = "https://github.com/triston-groff/SpectralLibrarian_Repo"
+Repository = "https://github.com/triston-groff/SpectralLibrarian_Repo"
+Issues = "https://github.com/triston-groff/SpectralLibrarian_Repo/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"MSAnalyzer" = ["*.csv", "*.msp", "tests/data/*"]
+"SpectralLibrarian" = ["*.csv", "*.msp", "tests/data/*"]
