@@ -15,3 +15,8 @@ scipy==1.16.1
 SpectralEntropy==1.0.0          # ← corrected name
                                 # Use ==1.0.2 if you are on e-stan's fork[](https://github.com/e-stan/SpectralEntropy)
 tqdm==4.67.1
+matplotlib==3.9.2
+seaborn==0.13.2
+jupyterlab>=4.4.0
+ipywidgets>=8.1.5
+notebook>=7.4.0
