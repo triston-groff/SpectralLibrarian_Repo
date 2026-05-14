@@ -28,6 +28,7 @@ dependencies = [
     "scikit-learn>=1.5",
     "ms_entropy>=1.0",
     "pyteomics",
+    "pubchempy",
     "joblib",
     "psutil",
     "tqdm",
