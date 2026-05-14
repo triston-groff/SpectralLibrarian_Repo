@@ -27,7 +27,7 @@ dependencies = [
     "scipy>=1.16",
     "scikit-learn>=1.5",
     "ms_entropy>=1.0",
-    "pyteomics"
+    "pyteomics",
     "joblib",
     "psutil",
     "tqdm",
