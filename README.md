@@ -1,6 +1,11 @@
 # SpectralLibrarian
-Computational MS project repo for adduct analysis , computing similarities, handling spectral data, etc
 
-## Current tasks
-1. Update pyproject.toml (and related files) to change package name from MSAnalyzer-->SpectralLibrarian so that installing with pip works
-2. Update requirments list
+**State-of-the-art mass spectrometry & chemoinformatics toolkit** with hierarchical structural analysis and fingerprint ensembles.
+
+A comprehensive Python library for adduct analysis, spectral similarity computation, spectral library management, and advanced chemoinformatics workflows.
+
+## Installation
+
+### For users (once published to PyPI)
+```bash
+pip install SpectralLibrarian
