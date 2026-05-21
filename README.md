@@ -2,7 +2,14 @@
 
 **State-of-the-art mass spectrometry & chemoinformatics toolkit.**
 
+<p align="left">
+  <img src="assets/SpectralLibrarian_LOGO.png" alt="SpectralLibrarian" width="490" />
+</p>
+
+
 A comprehensive Python library for adduct analysis, spectral similarity computation, spectral library management, and advanced chemoinformatics workflows.
+
+
 
 ## Installation
 
