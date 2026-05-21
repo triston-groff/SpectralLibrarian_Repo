@@ -1,6 +1,6 @@
 # SpectralLibrarian
 
-**State-of-the-art mass spectrometry & chemoinformatics toolkit** with hierarchical structural analysis and fingerprint ensembles.
+**State-of-the-art mass spectrometry & chemoinformatics toolkit.**
 
 A comprehensive Python library for adduct analysis, spectral similarity computation, spectral library management, and advanced chemoinformatics workflows.
 

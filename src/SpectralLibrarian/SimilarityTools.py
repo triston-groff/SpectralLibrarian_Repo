@@ -1,20 +1,20 @@
 # src/SpectralLibrarian/SimilarityTools.py
+from __future__ import annotations
+
 """
 SimilarityTools – Ultra-fast, publication-grade spectral similarity scoring
 
 Features:
-• score_similarity(spec1, spec2, method=...) – single pair
-  → method can be:
-      - "modified_cosine" (our vectorized + Hungarian – fastest & most accurate)
-      - any SpectralEntropy method name ("entropy", "ms_for_id", "pearson_correlation", ...)
-      - list of methods
-      - "all_entropy" → all 43 SpectralEntropy methods
-      - "matchms_*" → matchms metrics (optional)
+    • score_similarity(spec1, spec2, method=…) – single pair
+      → method can be:
+          - "modified_cosine" (our vectorized + Hungarian – fastest & most accurate)
+          - any SpectralEntropy method name ("entropy", "ms_for_id", "pearson_correlation", ...)
+          - list of methods
+          - "all_entropy" → all 43 SpectralEntropy methods
+          - "matchms_*" → matchms metrics (optional)
 
-• batch_score_similarity(pairs_df, ...) – millions-safe, checkpointed, resumable
+    • batch_score_similarity(pairs_df, …) – millions-safe, checkpointed, resumable
 """
-
-
 ###############################################################
 # NEED TO IMPLEMENT THIS
 ###############################################################
@@ -86,7 +86,7 @@ Features:
 ###############################################################
 
 
-from __future__ import annotations
+
 
 import os
 import json

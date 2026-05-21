@@ -1,11 +1,6 @@
-# src/MSAnalyzer/LibraryManager.py
+# src/SpectralLibrarian/LibraryManager.py
 """
 LibraryManager – MSP/MGF/JSON parser with annotated peak support
-- mz_array, intensity_array, annotations_array all guaranteed same length
-- annotations_array uses np.ndarray[object] (None for peaks without annotation)
-- Now supports GNPS-style .json (JSON Lines / NDJSON) libraries
-- ROBUSTNESS FIX (v0.4.1): Handles scalar None / 0-d arrays / Num Peaks=1 cases
-  that survived heavy dataframe filtering/renaming
 """
 
 from __future__ import annotations
@@ -18,6 +13,15 @@ from typing import Dict, Any, Union
 
 
 class LibraryManager:
+    """LibraryManager – MSP/MGF/JSON parser with annotated peak support
+
+    - mz_array, intensity_array, annotations_array all guaranteed same length
+    - annotations_array uses np.ndarray[object] (None for peaks without annotation)
+    - Now supports GNPS-style .json (JSON Lines / NDJSON) libraries
+    - ROBUSTNESS FIX: handles scalar None / 0-d arrays / Num Peaks=1 cases
+      that survived heavy dataframe filtering/renaming
+    """
+
     def __init__(
         self,
         input: Union[str, Path, pd.DataFrame],

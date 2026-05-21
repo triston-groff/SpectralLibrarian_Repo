@@ -1,19 +1,25 @@
 # src/SpectralLibrarian/__init__.py
 """
 SpectralLibrarian – Advanced Mass Spectrometry & Chemoinformatics Toolkit
-===================================================================
-
-Version: 0.2.1 (April 28, 2025)
-Author: Triston Groff
-License: MIT
+============================================================================
 """
 
 from __future__ import annotations
 
 from .version import __version__
-#__version__ = "0.2.1"
+
 __author__ = "Triston Groff"
 __license__ = "MIT"
+
+# Dynamically update the module docstring with the real version
+__doc__ = f"""
+SpectralLibrarian – Advanced Mass Spectrometry & Chemoinformatics Toolkit
+============================================================================
+
+Version: {__version__}
+Author: Triston Groff
+License: MIT
+"""
 
 # Core
 from .LibraryManager import LibraryManager

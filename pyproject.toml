@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "SpectralLibrarian"
 dynamic = ["version"]
-description = "State-of-the-art mass spectrometry & chemoinformatics toolkit with hierarchical structural analysis and fingerprint ensembles"
+description = "State-of-the-art mass spectrometry & chemoinformatics toolkit"
 readme = "README.md"
 authors = [
     {name = "Triston Groff", email = "triston.lee.groff@gmail.com"},
