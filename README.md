@@ -6,12 +6,21 @@ A comprehensive Python library for adduct analysis, spectral similarity computat
 
 ## Installation
 
-### For users (once published to PyPI)
+---
+
+### 1. Create a virtual environment (recommended)
+
 ```bash
-pip install SpectralLibrarian
+python -m venv .venv
+```
 
-
-## Installation
+```bash
+.venv\Scripts\activate          # Windows
+```
+```bash
+# source .venv/bin/activate     # macOS / Linux
+```
+---
 
 ### ⚠️ Important: Windows Users Only (One-Time Setup)
 **SpectralLibrarian** depends on **SpectralEntropy**, which contains a performance-critical Cython extension that must be compiled from source on Windows.
@@ -25,15 +34,15 @@ you need to install the **Microsoft C++ Build Tools** first:
 
 During installation, select the **“Desktop development with C++”** workload.
 
-After this finishes (one-time only), you can install the package normally.
+After this finishes, you can install the package normally.
 
 **macOS and Linux users** do **not** need any extra steps.
 
----
 
-### 1. Create a virtual environment (recommended)
 
+
+### For users (once published to PyPI)
 ```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS / Linux
+pip install SpectralLibrarian
+```
+
