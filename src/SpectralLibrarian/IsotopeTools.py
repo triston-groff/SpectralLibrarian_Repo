@@ -1,17 +1,16 @@
-# src/SpectralLibrarian/IsotopeTools.py
+# src/MSAnalyzer/isotope.py
 """
 Theoretical isotopic distribution tools
-Usage: sl.IsotopeTools.batch_isotopic_distribution(), sl.IsotopeTools.add_isotopic_distribution_to_df(), etc
+Usage: msa.isotope.compute(), msa.isotope.add_to_dataframe()
 """
 
-from __future__ import annotations
-
-from typing import List, Tuple, Iterable, Dict
-import numpy as np
+from typing import *
 from concurrent.futures import ThreadPoolExecutor
-from pyteomics.mass import Composition, isotopologues, calculate_mass
 from collections import defaultdict
 
+from pyteomics.mass import Composition, isotopologues, calculate_mass
+import pyteomics
+import numpy as np, pandas as pd
 
 def _make_labels(iso_comp: Composition) -> Dict[str, int]:
     labels: Dict[str, int] = {}
@@ -141,3 +140,5 @@ def add_isotopic_distribution_to_df(
     df['isotopic_abundances'] = abundances
     df['isotopologues'] = labels
     return df
+
+__all__ = ["compute_isotopic_distribution", "batch_isotopic_distribution", "add_isotopic_distribution_to_df"]

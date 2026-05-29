@@ -1,28 +1,20 @@
 # MSAnalyzer/structural_analysis.py
 """
-StructuralAnalysis - SMILES/SMARTS-based structural categorizer
+StructuralAnalysis - Ultimate RDKit-based hierarchical structural categorizer
+November 2025 - Final Gold Standard Version
 """
-
-from __future__ import annotations
-
-import numpy as np
-from typing import Dict, List, Set, Tuple, Iterable, Optional
+from typing import *
 from collections import defaultdict
 from itertools import combinations
 
 from rdkit import Chem
-from rdkit.Chem import rdMolDescriptors, rdmolops, Fragments
-from scipy.sparse import csr_matrix
-
-from typing import Dict, Iterable, Optional, Tuple
-import numpy as np
-from rdkit import Chem
-from rdkit.Chem import rdFingerprintGenerator
+from rdkit.Chem import rdmolops, Fragments, rdFingerprintGenerator
 from rdkit.Chem.rdFingerprintGenerator import GetMorganFeatureAtomInvGen
 from scipy.sparse import csr_matrix
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import pickle
-from pathlib import Path
+
+import pandas as pd, numpy as np
+import os
+
 
 
 
@@ -107,7 +99,6 @@ FUNCTIONAL_GROUPS = {
     "iodide": "[I]",
     "alkene": "[CX3]=[CX3]",
     "alkyne": "[CX2]#[CX2]",
-    "alkyne": "[CX2]#[CX2]",
     "allene": "[CX2]=[CX2]=[CX2]",
     "acetal_hemiacetal": "[CX4]([OX2H0][CX4])[OX2H0][CX4]",  # or better pattern if you prefer
     "o_glycosidic": "[CX4][OX2][CX4]1[CX4][CX4][CX4][CX4]1",  # simplified – can be refined
@@ -139,49 +130,49 @@ CARBOHYDRATE_PATTERNS = {
     "beta_anomer": "[OX2R]1[CH1X4@][OH1][CR]C1",
 }
 
+from .utilities import parallelize
 
-def _is_allowed(mol: Chem.Mol) -> bool:
-    return all(a.GetAtomicNum() in ALLOWED_ATOMIC_NUMS for a in mol.GetAtoms())
+def classify_molecules_from_smiles(inputfile:str, outputfile:str, smiles_col="smiles", num_cores:int=os.cpu_count()-2, usertags_excelfile:str=None):
+    if not (inputfile.endswith(".xlsx") and outputfile.endswith(".xlsx")):
+        raise FileNotFoundError("Both inputfile and outputfile should be .xlsx file")
 
+    df = pd.read_excel(inputfile)
+    neutral_smiles = list(df[smiles_col])
 
-def _get_property_categories(mol: Chem.Mol) -> Dict[str, int]:
-    cats = {}
+    usertags = None
+    if not (usertags_excelfile is None):
+        if not (usertags_excelfile.endswith(".xlsx")):
+            raise FileNotFoundError("Both usertag inputfile should be .xlsx file")
+        df_tag =  pd.read_excel(usertags_excelfile)
+        usertags = dict(zip(list(df_tag["group_name"]), list(df_tag["smarts"])))
 
-    if (mol.HasSubstructMatch(Chem.MolFromSmarts("[CX3](=O)[OX2H1]")) or
-        mol.HasSubstructMatch(Chem.MolFromSmarts("[SX4](=O)(=O)[OX2H1]")) or
-        mol.HasSubstructMatch(Chem.MolFromSmarts("[PX4](=O)([OX2H])[OX2H]")) or
-        mol.HasSubstructMatch(Chem.MolFromSmarts("c[OH1]"))):
-        cats["acidic"] = 1
+    molecules = []
+    argslist = []
+    for smiles in neutral_smiles:
+        try:
+            molecule = Chem.MolFromSmiles(SMILES=smiles)
+        except:
+            molecule = None
+        molecules.append(molecule)
+        argslist.append((molecule, usertags))
 
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3;H2,H1,H0;!$(N-C=[O,S,N]);!$(N-S(=O)=O)]")):
-        cats["basic"] = 1
+    # categories_list = categorize_molecules(mols=molecules, usertags=usertags)
+    categories_list = parallelize(workfunc=categorize_molecule, num_cores=num_cores, argslist=argslist)
+    sparse_mat, feature_list = categories_to_sparse(categories_list)
 
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX4+,NX3+;H3,H2,H1]")):
-        cats["cationic"] = 1
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[O-,S-,P-,N-]")):
-        cats["anionic"] = 1
-    if cats.get("cationic") and cats.get("anionic"):
-        cats["zwitterionic"] = 1
+    df_result = pd.DataFrame.from_records(np.array(sparse_mat.todense()), columns=feature_list, index=neutral_smiles)
+    df_result = df_result.reset_index(drop=False).rename(columns={"index": smiles_col})
+    os.makedirs(os.path.dirname(outputfile), exist_ok=True)
+    df_result.to_excel(outputfile, index=False)
 
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[N,O,S,F,Cl,Br,I;X1,X2,X3,X4;!+;!-]")):
-        cats["lewis_base_lone_pair"] = 1
+def categorize_molecules(mols: Iterable[Chem.Mol], usertags:Dict[str, str]=None) -> List[Dict[str, int]]:
+    results = []
+    for i, m in enumerate(mols):
+        print("Functional Group Processing : " + str(i + 1) + " / " + str(len(mols)) + " completed")
+        results.append(categorize_molecule(m, usertags=usertags))
+    return results
 
-    if (mol.HasSubstructMatch(Chem.MolFromSmarts("[CX3]=[CX3]")) or any(a.GetIsAromatic() for a in mol.GetAtoms())):
-        cats["lewis_base_pi"] = 1
-
-    if cats.get("lewis_base_lone_pair") or cats.get("lewis_base_pi"):
-        cats["lewis_base"] = 1
-
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[B;!$(B-[#6]);D2,D3]")) or mol.HasSubstructMatch(Chem.MolFromSmarts("[P,S;X5,X6]")):
-        cats["lewis_acid"] = 1
-
-    if any(a.GetIsAromatic() for a in mol.GetAtoms()):
-        cats["aromatic"] = 1
-
-    return cats
-
-
-def categorize_molecule(mol: Chem.Mol) -> Dict[str, int]:
+def categorize_molecule(mol: Chem.Mol, usertags:Dict[str, str]=None) -> Dict[str, int]:
     if mol is None or not _is_allowed(mol):
         return {}
 
@@ -192,6 +183,7 @@ def categorize_molecule(mol: Chem.Mol) -> Dict[str, int]:
     elem_count = defaultdict(int)
     for a in mol.GetAtoms():
         elem_count[a.GetSymbol()] += 1
+
     for sym, cnt in elem_count.items():
         for thr in [1, 2, 4, 6, 8]:
             if cnt >= thr:
@@ -208,11 +200,11 @@ def categorize_molecule(mol: Chem.Mol) -> Dict[str, int]:
         if count > 0:
             cats[fr_name.replace('fr_', '')] = count
 
-    # === NEW TAGS YOU NEED ===
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[F][C]")):           # any C-F bond → PFAS
-        cats["perfluoro"] = 1
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("c1ccc(c(c1)C(=O)O)C(=O)O")):  # phthalate core
-        cats["phthalate"] = 1
+    # user-defined tags
+    if not (usertags is None):
+        for k, v in usertags.items():
+            if mol.HasSubstructMatch(Chem.MolFromSmarts(v)):
+                cats[k] = 1
 
     # Hierarchy propagation
     for parent, children in HIERARCHICAL_GROUPS.items():
@@ -257,9 +249,45 @@ def categorize_molecule(mol: Chem.Mol) -> Dict[str, int]:
     return cats
 
 
-def categorize_molecules(mols: Iterable[Chem.Mol]) -> List[Dict[str, int]]:
-    return [categorize_molecule(m) for m in mols]
+def _is_allowed(mol: Chem.Mol) -> bool:
+    return all(a.GetAtomicNum() in ALLOWED_ATOMIC_NUMS for a in mol.GetAtoms())
 
+
+def _get_property_categories(mol: Chem.Mol) -> Dict[str, int]:
+    cats = {}
+
+    if (mol.HasSubstructMatch(Chem.MolFromSmarts("[CX3](=O)[OX2H1]")) or
+        mol.HasSubstructMatch(Chem.MolFromSmarts("[SX4](=O)(=O)[OX2H1]")) or
+        mol.HasSubstructMatch(Chem.MolFromSmarts("[PX4](=O)([OX2H])[OX2H]")) or
+        mol.HasSubstructMatch(Chem.MolFromSmarts("c[OH1]"))):
+        cats["acidic"] = 1
+
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3;H2,H1,H0;!$(N-C=[O,S,N]);!$(N-S(=O)=O)]")):
+        cats["basic"] = 1
+
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[NX4+,NX3+;H3,H2,H1]")):
+        cats["cationic"] = 1
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[O-,S-,P-,N-]")):
+        cats["anionic"] = 1
+    if cats.get("cationic") and cats.get("anionic"):
+        cats["zwitterionic"] = 1
+
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[N,O,S,F,Cl,Br,I;X1,X2,X3,X4;!+;!-]")):
+        cats["lewis_base_lone_pair"] = 1
+
+    if (mol.HasSubstructMatch(Chem.MolFromSmarts("[CX3]=[CX3]")) or any(a.GetIsAromatic() for a in mol.GetAtoms())):
+        cats["lewis_base_pi"] = 1
+
+    if cats.get("lewis_base_lone_pair") or cats.get("lewis_base_pi"):
+        cats["lewis_base"] = 1
+
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[B;!$(B-[#6]);D2,D3]")) or mol.HasSubstructMatch(Chem.MolFromSmarts("[P,S;X5,X6]")):
+        cats["lewis_acid"] = 1
+
+    if any(a.GetIsAromatic() for a in mol.GetAtoms()):
+        cats["aromatic"] = 1
+
+    return cats
 
 def categories_to_sparse(categories_list: List[Dict[str, int]], feature_list: Optional[List[str]] = None) -> Tuple[csr_matrix, List[str]]:
     if feature_list is None:
@@ -338,88 +366,13 @@ def _process_single_molecule(args) -> Tuple[list, list, list]:
     return rows, cols, vals
 
 
-def get_fingerprint_ensemble(
-    mols: Iterable[Chem.Mol],
-    generators: Optional[Dict[str, object]] = None,
-    max_workers: Optional[int] = None,
-    checkpoint_file: Optional[str] = None,
-) -> Tuple[csr_matrix, Dict[str, Tuple[int, int]]]:
-    """
-    Generate a sparse count-based fingerprint matrix.
-
-    Returns
-    -------
-    fp_matrix : csr_matrix
-        Shape = (n_molecules, ~50 331 776)
-    metadata : dict
-        Column ranges for each generator.
-    """
-    if generators is None:
-        generators = DEFAULT_GENERATORS
-
-    gens_list = list(generators.items())
-    n_morgan = sum(1 for name in generators if "morgan" in name)
-
-    # Total number of columns
-    total_cols = n_morgan * HASHED_FP_SIZE + RDKIT_COUNT_SIZE
-
-    # Checkpoint logic
-    start_idx = 0
-    if checkpoint_file and Path(checkpoint_file).exists():
-        with open(checkpoint_file, "rb") as f:
-            rows, cols, data, start_idx = pickle.load(f)
-        print(f"Resuming from molecule {start_idx}")
-    else:
-        rows, cols, data = [], [], []
-
-    mols_list = list(mols)
-    total = len(mols_list)
-    tasks = []
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for idx in range(start_idx, total):
-            tasks.append(executor.submit(_process_single_molecule, (mols_list[idx], idx, generators)))
-
-            if len(tasks) >= 1000:
-                for future in as_completed(tasks):
-                    r, c, v = future.result()
-                    rows.extend(r); cols.extend(c); data.extend(v)
-                tasks = []
-
-                if checkpoint_file:
-                    with open(checkpoint_file, "wb") as f:
-                        pickle.dump((rows, cols, data, idx + 1), f)
-
-                print(f"Processed {idx + 1}/{total} molecules")
-
-        # Final batch
-        for future in as_completed(tasks):
-            r, c, v = future.result()
-            rows.extend(r); cols.extend(c); data.extend(v)
-
-    # Build matrix
-    fp_matrix = csr_matrix((data, (rows, cols)), shape=(total, total_cols), dtype=np.uint16)
-
-    # Metadata
-    metadata = {}
-    offset = 0
-    for name, _ in gens_list:
-        size = HASHED_FP_SIZE if "morgan" in name else RDKIT_COUNT_SIZE
-        metadata[name] = (offset, offset + size)
-        offset += size
-
-    if checkpoint_file and Path(checkpoint_file).exists():
-        Path(checkpoint_file).unlink()
-
-    return fp_matrix, metadata
-
-
 def combine_with_structural_features(a: csr_matrix, b: csr_matrix) -> csr_matrix:
     from scipy.sparse import hstack
     return hstack([a, b], format="csr")
 
 
 __all__ = [
+    "classify_molecules_from_smiles",
     "categorize_molecule",
     "categorize_molecules",
     "categories_to_sparse",
@@ -427,8 +380,7 @@ __all__ = [
     "HIERARCHICAL_GROUPS",
     "FUNCTIONAL_GROUPS",
     "CARBOHYDRATE_PATTERNS",
-    "get_fingerprint_ensemble",
     "combine_with_structural_features",
-    "DEFAULT_GENERATORS",
+    "DEFAULT_GENERATORS"
 ]
 

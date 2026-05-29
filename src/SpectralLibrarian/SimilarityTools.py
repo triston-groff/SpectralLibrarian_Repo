@@ -1,92 +1,170 @@
-# src/SpectralLibrarian/SimilarityTools.py
-from __future__ import annotations
+# src/MSAnalyzer/SimilarityTools.py
+# from .SpectralTools import *
+# from .utilities import *
 
-"""
-SimilarityTools – Ultra-fast, publication-grade spectral similarity scoring
+from .SpectralTools import str2spec
+from .utilities import parallelize
 
-Features:
-    • score_similarity(spec1, spec2, method=…) – single pair
-      → method can be:
-          - "modified_cosine" (our vectorized + Hungarian – fastest & most accurate)
-          - any SpectralEntropy method name ("entropy", "ms_for_id", "pearson_correlation", ...)
-          - list of methods
-          - "all_entropy" → all 43 SpectralEntropy methods
-          - "matchms_*" → matchms metrics (optional)
+from typing import *
+from itertools import combinations
+from collections import defaultdict
 
-    • batch_score_similarity(pairs_df, …) – millions-safe, checkpointed, resumable
-"""
-###############################################################
-# NEED TO IMPLEMENT THIS
-###############################################################
-# def pairwise_combinations_df(filtered_df, match_cols=None, dont_match_cols=None, tol_dict=None, id_col='ID', group_chunk_size=500):
-#     """
-#     Generate pairwise DF with flexible filtering criteria.
-#     
-#     Parameters:
-#     - filtered_df: Input DataFrame.
-#     - match_cols: List of columns that must match (equal values), e.g., ['FORMULA', 'INSTRUMENTTYPE'].
-#     - dont_match_cols: List of columns that must not match (different values), e.g., ['PRECURSORTYPE'].
-#     - tol_dict: Dict of {column: tolerance} for numeric columns where abs(diff) <= tol.
-#     - id_col: Column name for IDs, added as 'ID_1'/'ID_2' (default 'ID'; assume in columns).
-#     - group_chunk_size: Number of rows per chunk within a group (default 500).
-#     
-#     Returns:
-#     - result_df: DataFrame with pairs, columns suffixed _1 and _2, plus ID_1/ID_2.
-#     
-#     Optimizations:
-#     - Vectorized condition checks with broadcasting.
-#     - Sequential group and chunk processing to minimize memory.
-#     - Incremental append to CSV to avoid holding all pairs in memory.
-#     - If loading full CSV causes OOM, comment out read_csv/to_pickle and use the CSV in chunks.
-#     """
-#     # Checkpoint: Load from pickle if exists
-#     pickle_path = 'pairwise_df.pkl'
-#     if os.path.exists(pickle_path):
-#         print(f"Loading pairwise_df from {pickle_path} to avoid recomputation.")
-#         return pd.read_pickle(pickle_path)
-#     
-#     match_cols = match_cols if match_cols is not None else []
-#     dont_match_cols = dont_match_cols if dont_match_cols is not None else []
-#     tol_dict = tol_dict if tol_dict is not None else {}
-#     all_keys = set(match_cols + dont_match_cols + list(tol_dict.keys()) + [id_col])
-#     if not all_keys.issubset(filtered_df.columns):
-#         raise ValueError(f"All keys must be in DataFrame columns. Missing: {all_keys - set(filtered_df.columns)}")
-#     
-#     # Group by all match_cols for better splitting
-#     group_key = match_cols if match_cols else None
-#     if group_key:
-#         grouped = filtered_df.groupby(group_key)
-#     else:
-#         grouped = [(None, filtered_df)]
-#     
-#     csv_path = 'pairwise_df.csv'
-#     if os.path.exists(csv_path):
-#         os.remove(csv_path)
-#     
-#     # Sequential process groups
-#     for key, group in grouped:
-#         print(f"Processing group {key}, size: {len(group)}")
-#         process_group(group, match_cols=match_cols, dont_match_cols=dont_match_cols, tol_dict=tol_dict, id_col=id_col, chunk_size=group_chunk_size, csv_path=csv_path)
-#         gc.collect()
-#     
-#     # Load full (comment out if OOM, use csv_path directly)
-#     result_df = pd.read_csv(csv_path)
-#     
-#     # Convert array columns back to lists (add more cols if needed)
-#     array_cols = ['mz_array_1', 'mz_array_2', 'intensity_array_1', 'intensity_array_2']
-#     for col in array_cols:
-#         if col in result_df.columns:
-#             result_df[col] = result_df[col].apply(ast.literal_eval)
-#     
-#     # Checkpoint: Save to pickle (comment out if OOM)
-#     result_df.to_pickle(pickle_path)
-#     print(f"Saved pairwise_df to {pickle_path}.")
-#     
-#     return result_df
-###############################################################
+import pandas as pd, pickle as pkl
+import gc
 
 
+# TODO : New
+def pairwise_combinations_df(inputpath:str, resultpath:str, id_col:str, match_cols:Union[str, List[str]], dont_match_cols:Union[str, List[str]],
+                             method:Union[str, List[str]] = "modified_cosine", mz_tol: float = 0.02, tol_dict:Dict[str, float]={}):
+    """
+    Generate pairwise DF with flexible filtering criteria.
 
+    Parameters:
+    - filtered_df: Input DataFrame.
+    - resultpath: Path of output file, should be txt, tsv, csv, or xlsx file
+    - match_cols: List of columns that must match (equal values), e.g., ['FORMULA', 'INSTRUMENTTYPE'].
+    - dont_match_cols: List of columns that must not match (different values), e.g., ['PRECURSORTYPE'].
+    - tol_dict: Dict of {column: tolerance} for numeric columns where abs(diff) <= tol.
+    - id_col: Column name for IDs, added as 'ID_1'/'ID_2' (default 'ID'; assume in columns).
+
+    Returns:
+    - result_df: DataFrame with pairs, columns suffixed _1 and _2, plus ID_1/ID_2.
+
+    Optimizations:
+    - Vectorized condition checks with broadcasting.
+    - Sequential group and chunk processing to minimize memory.
+    - Incremental append to CSV to avoid holding all pairs in memory.
+    - If loading full CSV causes OOM, comment out read_csv/to_pickle and use the CSV in chunks.
+    """
+    ext2sep = {"txt": "\t", "tsv": "\t", "csv": ",", "xlsx": None, "pkl": None}
+    inext = inputpath.split(".")[-1]
+    if not (inext in ext2sep.keys()):
+        raise ValueError("The extender of 'inputpath' should be one of the followings : " + str(list(ext2sep.keys())))
+
+    if inext == "pkl":
+        with open(inputpath, "rb") as f:
+            input_df = pkl.load(f)
+    elif inext == "xlsx":
+        input_df = pd.read_excel(inputpath)
+    else:
+        input_df = pd.read_csv(inputpath, sep=inext)
+
+    outext = resultpath.split(".")[-1]
+    if not (outext in ext2sep.keys()):
+        raise ValueError("The extender of 'resultpath' should be one of the followings : " + str(list(ext2sep.keys())))
+
+    # Argument QC
+    match_cols = [match_cols] if type(match_cols)==str else match_cols
+    dont_match_cols = [dont_match_cols] if type(dont_match_cols)==str else dont_match_cols
+    all_keys = set(match_cols + dont_match_cols + list(tol_dict.keys()) + [id_col])
+    if not all_keys.issubset(input_df.columns):
+        raise ValueError(f"All keys must be in DataFrame columns. Missing: {all_keys - set(input_df.columns)}")
+
+    # Checkpoint: Load previous file if exists
+    if os.path.exists(resultpath):
+        print(f"Loading pairwise_df from {resultpath} to avoid recomputation.")
+        if outext == "xlsx":
+            df_completed = pd.read_excel(resultpath)
+        elif outext == "pkl":
+            with open(resultpath, "rb") as f:
+                df_completed = pkl.load(f)
+        else:
+            df_completed = pd.read_csv(resultpath, sep=ext2sep[outext])
+        completed_ids = np.unique(df_completed[[id_col+"_1", id_col+"_2"]].values.reshape(-1))
+        df_compute = input_df.loc[~input_df[id_col].isin(completed_ids)]
+    else:
+        df_completed = pd.DataFrame()
+        df_compute = input_df.copy()
+
+    # Group by all match_cols for better splitting : Sequential process across groups, parallel process within groups
+    compute_groups = list(df_compute.groupby(match_cols))
+    for i, kg in enumerate(compute_groups):
+        key, df_group = kg
+        if len(df_group) > 1:
+            print(str((i + 1) * 100 / len(compute_groups)) + " % groups")
+            print(f"Processing group {key}")
+            df_group = df_group.reset_index(drop=True)
+            df_scores = process_group(df_group, dont_match_cols=dont_match_cols, method=method, mz_tol=mz_tol)
+            df_completed = pd.concat([df_completed.reset_index(drop=True), df_scores.reset_index(drop=True)], axis=0)
+            gc.collect()
+
+    if len(df_completed) == 0:
+        print("No pairs to be compared. Relieve constraints 'match_cols' and 'dont_match_cols', and try again")
+
+    if not os.path.exists(os.path.dirname(resultpath)):
+        os.makedirs(os.path.dirname(resultpath), exist_ok=True)
+
+    if outext == "xlsx":
+        df_completed.to_excel(resultpath, index=False)
+    elif outext == "pkl":
+        with open(resultpath, "wb") as f:
+            pkl.dump(df_completed, f)
+    else: # .csv
+        df_completed.to_csv(resultpath, sep=ext2sep[outext], index=False)
+
+
+def process_group(df_group:pd.DataFrame, dont_match_cols:List[str], method: Union[str, List[str]] = "modified_cosine", mz_tol: float = 0.02):
+    ids = list((df_group["ID"]))
+    precmzs = list(df_group["Precursor m/z"])
+    paircombidxs = combinations(list(range(len(df_group))), 2)
+
+    idmat, arglist = [], []
+    for idx1, idx2 in paircombidxs:
+        skip_this = False
+        for dmc in dont_match_cols:
+            if df_group.iloc[idx1][dmc] == df_group.iloc[idx2][dmc]:
+                skip_this = True # Should not be identical, so skip this pair
+                break
+
+        if skip_this:
+            continue
+
+        for id1, id2 in [[idx1, idx2], [idx2, idx1]]:
+            spec1 = str2spec(specstr=df_group.iloc[id1]["ms2spectrum"])
+            spec2 = str2spec(specstr=df_group.iloc[id2]["ms2spectrum"])
+            if not ((spec1 is None) or (spec2 is None)):
+                idmat.append([ids[id1], ids[id2]])
+                pmz1, pmz2 = precmzs[id1], precmzs[id2]
+                arglist.append((spec1, spec2, method, mz_tol, pmz1-pmz2, pmz1, pmz2))
+
+    print("Found " + str(len(arglist)) + " not matching by " + str(dont_match_cols))
+    if len(arglist) > 0:
+        df_idpairs = pd.DataFrame.from_records(idmat, columns=["ID_1", "ID_2"])
+        if len(arglist) > 15:
+            group_results = parallelize(workfunc=score_similarity, num_cores=os.cpu_count()-2, argslist=arglist)
+        else:
+            group_results = []
+            for arg in arglist:
+                spec1, spec2, method, mz_tol, precursor_diff, pmz1, pmz2 = arg
+                group_results.append(score_similarity(spec1, spec2, method, mz_tol, precursor_diff, pmz1, pmz2))
+        results_dict = merge_list_of_dict(data=group_results)
+        df_scores = pd.concat([df_idpairs, pd.DataFrame.from_dict(results_dict)], axis=1)
+    else:
+        df_scores = pd.DataFrame()
+    return df_scores
+
+
+def merge_list_of_dict(data: List[Dict[str, Union[float, int, str]]]):
+    out = defaultdict(list)
+    append_cache = {}
+    extend_cache = {}
+
+    for d in data:
+        for k, v in d.items():
+            if k not in append_cache:
+                append_cache[k] = out[k].append
+                extend_cache[k] = out[k].extend
+
+            if type(v) is list:
+                extend_cache[k](v)
+            else:
+                append_cache[k](v)
+
+    return dict(out)
+##############################################################
+
+
+# TODO: Following does not work
 
 import os
 import json
@@ -101,11 +179,9 @@ import warnings
 
 # SpectralEntropy
 try:
-    from spectral_entropy.spectral_similarity import (
-        similarity,
-        multiple_similarity,
-        all_similarity,
-    )
+    from ms_entropy import calculate_entropy_similarity
+    # from spectral_entropy.spectral_similarity import similarity, multiple_similarity, all_similarity
+    # from ms_entropy.
     HAS_ENTROPY = True
 except ImportError:  # pragma: no cover
     HAS_ENTROPY = False
@@ -113,49 +189,49 @@ except ImportError:  # pragma: no cover
 
 # matchms
 try:
-    from matchms import Spectrum as MatchmsSpectrum
-    from matchms.similarity import (
-        CosineGreedy,
-        ModifiedCosine,
-        NeutralLossCosine,
-        FingerprintSimilarity,
-    )
+    from matchms import Spectrum
+    from matchms.similarity import *
     HAS_MATCHMS = True
+    matchms_mapper = {
+        # "BinnedEmbeddingSimilarity": BinnedEmbeddingSimilarity,
+        "BlinkCosine": BlinkCosine,
+        "CosineGreedy": CosineGreedy,
+        "CosineHungarian": CosineHungarian,
+        # "FingerprintSimilarity": FingerprintSimilarity,
+        "FlashSimilarity": FlashSimilarity,
+        # "IntersectMz": IntersectMz,
+        # "MetadataMatch": MetadataMatch,
+        "ModifiedCosineGreedy": ModifiedCosineGreedy,
+        "ModifiedCosineHungarian": ModifiedCosineHungarian,
+        "NeutralLossesCosine": NeutralLossesCosine,
+        # "ParentMassMatch": ParentMassMatch,
+        # "PrecursorMzMatch": PrecursorMzMatch,
+    }
 except ImportError:  # pragma: no cover
     HAS_MATCHMS = False
 
 
-# ===================================================================
-# SINGLE PAIR SCORING
-# ===================================================================
-def score_similarity(
-    spec1: Dict[str, np.ndarray],
-    spec2: Dict[str, np.ndarray],
-    method: Union[str, List[str]] = "modified_cosine",
-    mz_tol: float = 0.02,
-    precursor_diff: float = 0.0,
-    precursor_mz1: float = None,
-    precursor_mz2: float = None,
-) -> Dict[str, float]:
+from .SpectralTools import normalizeSpectrum, spec2array
+
+def score_similarity(qspec: np.ndarray, lspec: np.ndarray, method: Union[str, List[str]] = "modified_cosine",
+                     mz_tol: float = 0.02, precursor_diff: float = 0.0, precursor_mz1: float = None, precursor_mz2: float = None) -> Dict[str, float]:
     """
     Score similarity between two spectra using any supported method.
+    method: string ("modified_cosine" (default), 'entropy_similarity' (by ms_entropy), 'other matchms similarity'), or a List of string of those methods
     """
-    from .SpectralTools import standardize_spectrum
-
-    spec1 = standardize_spectrum(spec1)
-    spec2 = standardize_spectrum(spec2)
-
-    q_mz, q_int = spec1["mz"], spec1["intensity"]
-    l_mz, l_int = spec2["mz"], spec2["intensity"]
-
-    scores = {}
+    qspec_norm = normalizeSpectrum(qspec)
+    lspec_norm = normalizeSpectrum(lspec)
 
     # Resolve method input
-    if isinstance(method, str):
-        methods = [method]
-    else:
-        methods = method
+    methods = [method] if isinstance(method, str) else method
+    scores = {}
 
+    # === SpectralEntropy ===
+    if HAS_ENTROPY and ("entropy_similarity" in methods):
+        scores["entropy_similarity"] = calculate_entropy_similarity(qspec_norm, lspec_norm)
+
+    q_mz, q_int = spec2array(qspec_norm)
+    l_mz, l_int = spec2array(lspec_norm)
     # === Our modified cosine (gold standard) ===
     if "modified_cosine" in methods:
         dot = np.sum(q_int * l_int)
@@ -168,30 +244,16 @@ def score_similarity(
         mod_dot = np.sum(q_int[row_ind[mask]] * l_int[col_ind[mask]]) if mask.any() else 0.0
         scores["modified_cosine"] = max(dot, mod_dot)
 
-    # === SpectralEntropy ===
-    if HAS_ENTROPY and any(m != "modified_cosine" for m in methods):
-        q_arr = np.column_stack([q_mz, q_int])
-        l_arr = np.column_stack([l_mz, l_int])
-
-        entropy_methods = [m for m in methods if m != "modified_cosine"]
-
-        if "all_entropy" in entropy_methods:
-            entropy_scores = all_similarity(q_arr, l_arr, ms2_ppm=mz_tol * 1e6)
-            scores.update(entropy_scores)
-        elif len(entropy_methods) == 1:
-            scores[entropy_methods[0]] = similarity(q_arr, l_arr, method=entropy_methods[0], ms2_ppm=mz_tol * 1e6)
-        elif len(entropy_methods) > 1:
-            entropy_scores = multiple_similarity(q_arr, l_arr, methods=entropy_methods, ms2_ppm=mz_tol * 1e6)
-            scores.update(entropy_scores)
-
     # === matchms (optional) ===
-    if HAS_MATCHMS:
-        q_sp = MatchmsSpectrum(mz=q_mz, intensities=q_int)
-        l_sp = MatchmsSpectrum(mz=l_mz, intensities=l_int)
-        if "matchms_cosine_greedy" in methods:
-            scores["matchms_cosine_greedy"] = CosineGreedy(tolerance=mz_tol).pair(q_sp, l_sp)["score"]
-        if "matchms_modified_cosine" in methods:
-            scores["matchms_modified_cosine"] = ModifiedCosine(tolerance=mz_tol).pair(q_sp, l_sp)["score"]
+    if HAS_MATCHMS and any(m in matchms_mapper for m in methods):
+        q_sp = Spectrum(mz=q_mz, intensities=q_int, metadata={"precursor_mz": precursor_mz1})
+        l_sp = Spectrum(mz=l_mz, intensities=l_int, metadata={"precursor_mz": precursor_mz2})
+        for m in methods:
+            if m in matchms_mapper:
+                if m in ["FlashSimilarity"]:
+                    scores[m] = float(matchms_mapper[m](tolerance=mz_tol).pair(q_sp, l_sp))
+                else:
+                    scores[m] = float(matchms_mapper[m](tolerance=mz_tol).pair(q_sp, l_sp)["score"])
 
     return scores
 
@@ -199,7 +261,8 @@ def score_similarity(
 # ===================================================================
 # BATCH SCORING – MILLIONS-SAFE
 # ===================================================================
-def batch_score_similarity( # AT LEAST WITH ALL_ENTROPY METHOD THERE IS PROBLEM WITH HANDLING COLUMN NAMES
+# AT LEAST WITH ALL_ENTROPY METHOD THERE IS PROBLEM WITH HANDLING COLUMN NAMES
+def batch_score_similarity(
     pairs_df: pd.DataFrame,
     method: Union[str, List[str]] = "modified_cosine",
     mz_tol: float = 0.02,
@@ -238,16 +301,7 @@ def batch_score_similarity( # AT LEAST WITH ALL_ENTROPY METHOD THERE IS PROBLEM 
             q = {"mz": row.query_mz, "intensity": row.query_intensity}
             l = {"mz": row.library_mz, "intensity": row.library_intensity}
             diff = row.precursor_diff if "precursor_diff" in row else row.query_precursor_mz - row.library_precursor_mz
-
-            scores = score_similarity(
-                q, l,
-                method=method,
-                mz_tol=mz_tol,
-                precursor_diff=diff,
-                precursor_mz1=row.query_precursor_mz,
-                precursor_mz2=row.library_precursor_mz,
-            )
-            results[global_idx] = scores
+            results[global_idx] = score_similarity(q, l, method=method, mz_tol=mz_tol, precursor_diff=diff, precursor_mz1=row.query_precursor_mz, precursor_mz2=row.library_precursor_mz)
 
             # Save every 10k
             if len(results) % 10_000 == 0:
@@ -282,3 +336,5 @@ def batch_score_similarity( # AT LEAST WITH ALL_ENTROPY METHOD THERE IS PROBLEM 
     Path(checkpoint_file).unlink(missing_ok=True)
 
     return result_df
+
+__all__ = ["pairwise_combinations_df", "score_similarity", "batch_score_similarity"]
