@@ -1,4 +1,4 @@
-from .utilities import takeClosest, eic_interpolator_linear_pure, within_ppm
+from .utilities import takeClosest, eic_interpolator_linear_pure, within_ppm, ppm_error
 
 from pyteomics import mzml
 from typing import *
@@ -7,15 +7,7 @@ import os, datetime, sqlite3
 import pandas as pd, numpy as np
 
 
-def readmzML(mzmldir, ppms, abdcos, half_width=0.65, ce=-1):
-    # Read the time when the rawData was generated
-    try:
-        with mzml.MzML(mzmldir.replace('"', "")) as f:
-            timestamp = datetime.datetime.fromisoformat(next(f.iterfind('run', recursive=False))['startTimeStamp'][:-1]).astimezone(datetime.timezone.utc)
-    except:
-        print("Warning: file timestamp could not be read")
-        timestamp = None
-
+def readmzML(mzmldir:str, ppms:List[float], abdcos:List[float], half_width:float=0.65, ce:float=-1):
     # Count the number of MS1 and MS2 spectra
     totalSpecnum = {}
     with mzml.read(mzmldir.replace('"', "")) as reader:
@@ -115,7 +107,7 @@ def readmzML(mzmldir, ppms, abdcos, half_width=0.65, ce=-1):
 
 
 class dbfile():
-    def __init__(self, specdb_path, metadb_path, ppms, abdcos, **kwargs):
+    def __init__(self, specdb_path:str, metadb_path:str, ppms, abdcos, **kwargs):
         self.specdb_path, self.metadb_path = specdb_path, metadb_path
         self.ms1ppm, self.ms2ppm = ppms
         self.ms1abdco, self.ms2abdco = abdcos

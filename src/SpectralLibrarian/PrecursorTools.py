@@ -8,7 +8,8 @@ import re, os
 
 # Adduct type defined in the Fiehn Lab : https://fiehnlab.ucdavis.edu/staff/kind/metabolomics/ms-adduct-calculator/
 abbdict = {'MeOH': 'CH3OH', 'ACN': 'CH3CN', 'IsoProp': 'C3H8O', 'DMSO': '(CH3)2SO', 'FA': 'HCOOH', 'Hac': 'CH3COOH', 'TFA': 'CF3COOH'}
-mass_e = mm.Formula('-').monoisotopic_mass
+# mass_e = mm.Formula('+').monoisotopic_mass
+mass_e = 0.000548579909 # electron mass
 
 # test_adducts = ['[M+H]+', '[M+NH4]+', '[M+Na]+', '[M+MeOH+H]+', '[M+K]+', '[M+ACN+H]+', '[M+2Na-H]+', '[M+IsoProp+H]+', '[M+ACN+Na]+', '[M+2K-H]+', '[M+DMSO+H]+', '[M+2ACN+H]+', '[M+IsoProp+Na+H]+', '[M+H-H2O]+',
 #                 '[2M+H]+', '[2M+NH4]+', '[2M+Na]+', '[2M+K]+', '[2M+ACN+H]+', '[2M+ACN+Na]+',

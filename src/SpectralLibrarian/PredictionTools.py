@@ -11,7 +11,7 @@ from .SpectralTools import normalizeSpectrum
 from collections import defaultdict
 from typing import *
 
-from huggingface_hub.utils import capture_output
+# from huggingface_hub.utils import capture_output
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from tqdm import tqdm

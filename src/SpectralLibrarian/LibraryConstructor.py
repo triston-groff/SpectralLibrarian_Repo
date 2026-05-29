@@ -86,6 +86,15 @@ def build_ms2library(mzmldir, ppms:Dict[str, float], abdcos:Dict[str, float], fu
 
     # Extract consensus MS2 spectra
     results = parallelize(workfunc=getConsensusMS2, num_cores=num_cores, argslist=argslist)
+    # results = [] # for debugging
+    # for i, args in enumerate(argslist):
+    #     try:
+    #         result = getConsensusMS2(*args)
+    #         results.append(result)
+    #     except Exception as e:
+    #         print("Failed index:", i)
+    #         print("Args:", args)
+    #         raise
 
     # save extracted spectra (Consensus MS2 spectra)
     ms2specstrs = []
@@ -141,8 +150,8 @@ def getConsensusMS2(prec_ints: List[float], ms2spectra: List[np.ndarray], ms2ppm
         combos = list(itertools.combinations(list(range(0, N)), 2))
         pairsim_matrix = np.zeros((N, N))
         for i, j in combos:
-            pairsim_matrix[i,j] = score_similarity(qspec=ms2spectra_sim_norm[i], lspec=ms2spectra_sim_norm[j], method="CosineGreedy") # or entropy_similarity
-            pairsim_matrix[j,i] = score_similarity(qspec=ms2spectra_sim_norm[j], lspec=ms2spectra_sim_norm[i], method="CosineGreedy") # or entropy_similarity
+            pairsim_matrix[i,j] = score_similarity(qspec=ms2spectra_sim_norm[i], lspec=ms2spectra_sim_norm[j], method="CosineGreedy")["CosineGreedy"] # or entropy_similarity
+            pairsim_matrix[j,i] = score_similarity(qspec=ms2spectra_sim_norm[j], lspec=ms2spectra_sim_norm[i], method="CosineGreedy")["CosineGreedy"] # or entropy_similarity
         pairsim_mean = np.sum(pairsim_matrix, axis=1)/(N - 1)
 
         # Remove the ms2spectra with mean similarity lower than the median

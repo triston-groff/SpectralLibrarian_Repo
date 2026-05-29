@@ -3,7 +3,7 @@
 # from .utilities import *
 
 from .SpectralTools import str2spec
-from .utilities import parallelize
+from .utilities import parallelize, merge_list_of_dict
 
 from typing import *
 from itertools import combinations
@@ -144,23 +144,6 @@ def process_group(df_group:pd.DataFrame, dont_match_cols:List[str], method: Unio
     return df_scores
 
 
-def merge_list_of_dict(data: List[Dict[str, Union[float, int, str]]]):
-    out = defaultdict(list)
-    append_cache = {}
-    extend_cache = {}
-
-    for d in data:
-        for k, v in d.items():
-            if k not in append_cache:
-                append_cache[k] = out[k].append
-                extend_cache[k] = out[k].extend
-
-            if type(v) is list:
-                extend_cache[k](v)
-            else:
-                append_cache[k](v)
-
-    return dict(out)
 ##############################################################
 
 
@@ -207,6 +190,8 @@ try:
         # "ParentMassMatch": ParentMassMatch,
         # "PrecursorMzMatch": PrecursorMzMatch,
     }
+    from matchms import set_matchms_logger_level
+    set_matchms_logger_level("ERROR")
 except ImportError:  # pragma: no cover
     HAS_MATCHMS = False
 

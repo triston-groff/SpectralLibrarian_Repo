@@ -64,4 +64,25 @@ def eic_interpolator_linear_pure(rts_itp, its_itp):
     return s
 
 
-__all__ = ["parallelize", "normalizeVec", "ppm_error", "within_ppm", "ppm_tol", "takeClosest", "eic_interpolator_linear_pure"]
+from collections import defaultdict
+
+def merge_list_of_dict(data: List[Dict[str, Union[float, int, str]]]):
+    out = defaultdict(list)
+    append_cache = {}
+    extend_cache = {}
+
+    for d in data:
+        for k, v in d.items():
+            if k not in append_cache:
+                append_cache[k] = out[k].append
+                extend_cache[k] = out[k].extend
+
+            if type(v) is list:
+                extend_cache[k](v)
+            else:
+                append_cache[k](v)
+
+    return dict(out)
+
+
+__all__ = ["parallelize", "normalizeVec", "ppm_error", "within_ppm", "ppm_tol", "takeClosest", "eic_interpolator_linear_pure", "merge_list_of_dict"]
