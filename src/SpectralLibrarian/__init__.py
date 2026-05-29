@@ -4,7 +4,7 @@ MSAnalyzer – Advanced Mass Spectrometry & Chemoinformatics Toolkit
 ===================================================================
 
 Version: 0.3.0 (November 20, 2025)
-Author: Triston Groff
+Author: Triston Groff, Yunwon Kang
 License: MIT
 """
 

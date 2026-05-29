@@ -24,23 +24,40 @@ classifiers = [
 ]
 
 dependencies = [
-    "joblib>=1.5.0",
-    "matchms==0.31.0",               # pinned to known compatible version
-    "ms_entropy>=1.3.9",
-    "numpy>=2.0.0,<2.3",             # this is the key compromise
-    "pandas>=2.2.3",
-    "psutil>=7.0.0",
-    "pubchempy>=1.0.5",
-    "pyteomics>=4.7.5",
-    "rdkit>=2024.09.1",
-    "scikit-learn>=1.5",
+    # Core numerical/data stack used directly by the package
+    "numpy>=2.2.6,<2.3",
+    "pandas>=2.3.3",
     "scipy>=1.15.3",
-    "SpectralEntropy @ git+https://github.com/triston-groff/SpectralEntropy.git",
-    "tqdm>=4.67.1",
+
+    # Mass spectrometry / spectral processing
+    "matchms>=0.33.0",
+    "ms_entropy>=1.5.0",
+    "pyteomics>=5.0",
+    "psims>=1.3.6",
+
+    # Chemoinformatics / chemical identifiers
+    "rdkit>=2026.3.2",
+    "molmass>=2025.4.14",
+    "pubchempy>=1.0.5",
+
+    # File I/O and structured data parsing
+    "openpyxl>=3.1.5",
+    "xmltodict>=1.0.4",
+
+    # Plotting used by analysis/visualization functions
+    "matplotlib>=3.10.9",
+    "seaborn>=0.13.2",
+
+    # CTS / websocket client wrapper
+    "python-socketio[client]>=5.16.2",
+
+    # Utilities used directly in package code
+    "joblib>=1.5.3",
+    "tqdm>=4.67.3",
 ]
 
+
 [project.optional-dependencies]
-plot = ["matplotlib>=3.9", "seaborn>=0.13"]
 jupyter = ["jupyterlab>=4.4", "ipywidgets>=8.1", "notebook>=7.4"]
 dev = [
     "black>=24.8.0",
