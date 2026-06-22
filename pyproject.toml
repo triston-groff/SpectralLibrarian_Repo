@@ -1,6 +1,6 @@
 # pyproject.toml
 [build-system]
-requires = ["setuptools>=68", "wheel", "Cython<3", "numpy>=2.0.0,<2.3"]
+requires = ["setuptools>=68", "wheel", "numpy>=2.0.0,<2.3"] #"Cython<3"
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -35,7 +35,7 @@ dependencies = [
     "rdkit>=2024.09.1",
     "scikit-learn>=1.5",
     "scipy>=1.15.3",
-    "SpectralEntropy @ git+https://github.com/triston-groff/SpectralEntropy.git",
+    "SpectralEntropy @ git+https://github.com/triston-groff/SpectralEntropy.git@215f94338a255103ef20701d411415b39ec02810",
     "tqdm>=4.67.1",
 ]
 
