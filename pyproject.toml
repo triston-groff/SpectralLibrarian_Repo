@@ -37,6 +37,7 @@ dependencies = [
     "scipy>=1.15.3",
     "SpectralEntropy @ git+https://github.com/triston-groff/SpectralEntropy.git@215f94338a255103ef20701d411415b39ec02810",
     "tqdm>=4.67.1",
+    "dask"
 ]
 
 [project.optional-dependencies]
