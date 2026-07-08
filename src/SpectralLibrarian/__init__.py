@@ -11,7 +11,6 @@ from .version import __version__
 __author__ = "Triston Groff"
 __license__ = "MIT"
 
-# Dynamically update the module docstring with the real version
 __doc__ = f"""
 SpectralLibrarian – Advanced Mass Spectrometry & Chemoinformatics Toolkit
 ============================================================================
@@ -44,6 +43,9 @@ from .SpectralTools import (
 from .SimilarityTools import (
     score_similarity,
     batch_score_similarity,
+    pairwise_combinations_df,           # new
+    process_group_chunk,                # new
+    process_group,                      # new
 )
 
 # Structural analysis & fingerprints
@@ -109,6 +111,9 @@ __all__ = [
 
     "score_similarity",
     "batch_score_similarity",
+    "pairwise_combinations_df",
+    "process_group_chunk",
+    "process_group",
 
     "categorize_molecule",
     "categorize_molecules",
