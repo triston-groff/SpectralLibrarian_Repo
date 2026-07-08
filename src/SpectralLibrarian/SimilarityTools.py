@@ -6,87 +6,8 @@ SimilarityTools – Ultra-fast, publication-grade spectral similarity scoring
 
 Features:
     • score_similarity(spec1, spec2, method=…) – single pair
-      → method can be:
-          - "modified_cosine" (our vectorized + Hungarian – fastest & most accurate)
-          - any SpectralEntropy method name ("entropy", "ms_for_id", "pearson_correlation", ...)
-          - list of methods
-          - "all_entropy" → all 43 SpectralEntropy methods
-          - "matchms_*" → matchms metrics (optional)
-
-    • batch_score_similarity(pairs_df, …) – millions-safe, checkpointed, resumable
+    • batch_score_similarity(pairs_df, …) – millions-safe, Dask-powered, checkpointed
 """
-###############################################################
-# NEED TO IMPLEMENT THIS
-###############################################################
-# def pairwise_combinations_df(filtered_df, match_cols=None, dont_match_cols=None, tol_dict=None, id_col='ID', group_chunk_size=500):
-#     """
-#     Generate pairwise DF with flexible filtering criteria.
-#     
-#     Parameters:
-#     - filtered_df: Input DataFrame.
-#     - match_cols: List of columns that must match (equal values), e.g., ['FORMULA', 'INSTRUMENTTYPE'].
-#     - dont_match_cols: List of columns that must not match (different values), e.g., ['PRECURSORTYPE'].
-#     - tol_dict: Dict of {column: tolerance} for numeric columns where abs(diff) <= tol.
-#     - id_col: Column name for IDs, added as 'ID_1'/'ID_2' (default 'ID'; assume in columns).
-#     - group_chunk_size: Number of rows per chunk within a group (default 500).
-#     
-#     Returns:
-#     - result_df: DataFrame with pairs, columns suffixed _1 and _2, plus ID_1/ID_2.
-#     
-#     Optimizations:
-#     - Vectorized condition checks with broadcasting.
-#     - Sequential group and chunk processing to minimize memory.
-#     - Incremental append to CSV to avoid holding all pairs in memory.
-#     - If loading full CSV causes OOM, comment out read_csv/to_pickle and use the CSV in chunks.
-#     """
-#     # Checkpoint: Load from pickle if exists
-#     pickle_path = 'pairwise_df.pkl'
-#     if os.path.exists(pickle_path):
-#         print(f"Loading pairwise_df from {pickle_path} to avoid recomputation.")
-#         return pd.read_pickle(pickle_path)
-#     
-#     match_cols = match_cols if match_cols is not None else []
-#     dont_match_cols = dont_match_cols if dont_match_cols is not None else []
-#     tol_dict = tol_dict if tol_dict is not None else {}
-#     all_keys = set(match_cols + dont_match_cols + list(tol_dict.keys()) + [id_col])
-#     if not all_keys.issubset(filtered_df.columns):
-#         raise ValueError(f"All keys must be in DataFrame columns. Missing: {all_keys - set(filtered_df.columns)}")
-#     
-#     # Group by all match_cols for better splitting
-#     group_key = match_cols if match_cols else None
-#     if group_key:
-#         grouped = filtered_df.groupby(group_key)
-#     else:
-#         grouped = [(None, filtered_df)]
-#     
-#     csv_path = 'pairwise_df.csv'
-#     if os.path.exists(csv_path):
-#         os.remove(csv_path)
-#     
-#     # Sequential process groups
-#     for key, group in grouped:
-#         print(f"Processing group {key}, size: {len(group)}")
-#         process_group(group, match_cols=match_cols, dont_match_cols=dont_match_cols, tol_dict=tol_dict, id_col=id_col, chunk_size=group_chunk_size, csv_path=csv_path)
-#         gc.collect()
-#     
-#     # Load full (comment out if OOM, use csv_path directly)
-#     result_df = pd.read_csv(csv_path)
-#     
-#     # Convert array columns back to lists (add more cols if needed)
-#     array_cols = ['mz_array_1', 'mz_array_2', 'intensity_array_1', 'intensity_array_2']
-#     for col in array_cols:
-#         if col in result_df.columns:
-#             result_df[col] = result_df[col].apply(ast.literal_eval)
-#     
-#     # Checkpoint: Save to pickle (comment out if OOM)
-#     result_df.to_pickle(pickle_path)
-#     print(f"Saved pairwise_df to {pickle_path}.")
-#     
-#     return result_df
-###############################################################
-
-
-
 
 import os
 import json
@@ -94,10 +15,12 @@ import pickle
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 from scipy.optimize import linear_sum_assignment
-from joblib import Parallel, delayed
 import warnings
+import gc
+from functools import partial
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # SpectralEntropy
 try:
@@ -107,7 +30,7 @@ try:
         all_similarity,
     )
     HAS_ENTROPY = True
-except ImportError:  # pragma: no cover
+except ImportError:
     HAS_ENTROPY = False
     warnings.warn("spectral_entropy not installed – entropy metrics disabled")
 
@@ -117,13 +40,13 @@ try:
     from matchms.similarity import (
         CosineGreedy,
         ModifiedCosine,
-        NeutralLossCosine,
-        FingerprintSimilarity,
     )
     HAS_MATCHMS = True
-except ImportError:  # pragma: no cover
+except ImportError:
     HAS_MATCHMS = False
 
+# Dask for large-scale batch scoring
+import dask.bag as db
 
 # ===================================================================
 # SINGLE PAIR SCORING
@@ -137,9 +60,6 @@ def score_similarity(
     precursor_mz1: float = None,
     precursor_mz2: float = None,
 ) -> Dict[str, float]:
-    """
-    Score similarity between two spectra using any supported method.
-    """
     from .SpectralTools import standardize_spectrum
 
     spec1 = standardize_spectrum(spec1)
@@ -150,13 +70,11 @@ def score_similarity(
 
     scores = {}
 
-    # Resolve method input
     if isinstance(method, str):
         methods = [method]
     else:
         methods = method
 
-    # === Our modified cosine (gold standard) ===
     if "modified_cosine" in methods:
         dot = np.sum(q_int * l_int)
         l_shift = l_mz + precursor_diff
@@ -168,7 +86,6 @@ def score_similarity(
         mod_dot = np.sum(q_int[row_ind[mask]] * l_int[col_ind[mask]]) if mask.any() else 0.0
         scores["modified_cosine"] = max(dot, mod_dot)
 
-    # === SpectralEntropy ===
     if HAS_ENTROPY and any(m != "modified_cosine" for m in methods):
         q_arr = np.column_stack([q_mz, q_int])
         l_arr = np.column_stack([l_mz, l_int])
@@ -184,7 +101,6 @@ def score_similarity(
             entropy_scores = multiple_similarity(q_arr, l_arr, methods=entropy_methods, ms2_ppm=mz_tol * 1e6)
             scores.update(entropy_scores)
 
-    # === matchms (optional) ===
     if HAS_MATCHMS:
         q_sp = MatchmsSpectrum(mz=q_mz, intensities=q_int)
         l_sp = MatchmsSpectrum(mz=l_mz, intensities=l_int)
@@ -197,186 +113,165 @@ def score_similarity(
 
 
 # ===================================================================
-# BATCH SCORING – MILLIONS-SAFE
+# DASK-BASED BATCH SCORING – MILLIONS-SAFE
 # ===================================================================
-import os
-import json
-import pickle
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from typing import Union, List, Optional
-from joblib import Parallel, delayed
-
 def batch_score_similarity(
-    # ================== INPUT OPTIONS ==================
-    pairs_df: Optional[pd.DataFrame] = None,   # Option 1: pass DataFrame
-
-    # Column names when using pairs_df
+    pairs_df: Optional[pd.DataFrame] = None,
     query_mz_array_col: str = "mz_array_1",
     query_intensity_array_col: str = "intensity_array_1",
     query_precursor_mz_col: str = "PRECURSORMZ_1",
-
     library_mz_array_col: str = "mz_array_2",
     library_intensity_array_col: str = "intensity_array_2",
     library_precursor_mz_col: str = "PRECURSORMZ_2",
-
-    # Option 2: Pass raw lists / arrays / Series directly (no DataFrame needed)
-    query_mz_arrays: Optional[list] = None,
-    query_intensity_arrays: Optional[list] = None,
-    query_precursor_mz: Optional[list] = None,
-    library_mz_arrays: Optional[list] = None,
-    library_intensity_arrays: Optional[list] = None,
-    library_precursor_mz: Optional[list] = None,
-
-    # ================== OTHER PARAMETERS ==================
-    method: Union[str, List[str]] = "dot_product",   # ← your requested default
+    method: Union[str, List[str]] = "dot_product",
     mz_tol: float = 0.02,
-    n_jobs: int = -1,
-    chunk_size: int = 50_000,
+    npartitions: int = 64,
+    scheduler: str = "processes",
     checkpoint_file: str = "similarity_checkpoint.json",
     result_pkl: str = "similarity_results.pkl",
     force_restart: bool = False,
 ) -> pd.DataFrame:
-    """
-    Fully flexible batch similarity scorer.
-    - Accepts either a DataFrame + column names OR raw lists/arrays directly.
-    - Default method is now "dot_product".
-    """
-    # ===================== BUILD INTERNAL DF =====================
-    if pairs_df is not None:
-        df = pairs_df.copy()
-        df = df.assign(
-            query_mz=df[query_mz_array_col],
-            query_intensity=df[query_intensity_array_col],
-            query_precursor_mz=df[query_precursor_mz_col],
-            library_mz=df[library_mz_array_col],
-            library_intensity=df[library_intensity_array_col],
-            library_precursor_mz=df[library_precursor_mz_col],
-        )
-    else:
-        # Build from raw arrays/lists
-        df = pd.DataFrame()
-        if query_mz_arrays is not None:
-            df['query_mz'] = pd.Series(query_mz_arrays)
-        if query_intensity_arrays is not None:
-            df['query_intensity'] = pd.Series(query_intensity_arrays)
-        if query_precursor_mz is not None:
-            df['query_precursor_mz'] = pd.Series(query_precursor_mz)
-        else:
-            df['query_precursor_mz'] = 0.0
+    """Dask-powered batch scorer for millions of rows."""
+    if pairs_df is None:
+        raise ValueError("pairs_df is required")
 
-        if library_mz_arrays is not None:
-            df['library_mz'] = pd.Series(library_mz_arrays)
-        if library_intensity_arrays is not None:
-            df['library_intensity'] = pd.Series(library_intensity_arrays)
-        if library_precursor_mz is not None:
-            df['library_precursor_mz'] = pd.Series(library_precursor_mz)
-        else:
-            df['library_precursor_mz'] = 0.0
-
+    df = pairs_df.copy()
+    df = df.assign(
+        query_mz=df[query_mz_array_col],
+        query_intensity=df[query_intensity_array_col],
+        query_precursor_mz=df[query_precursor_mz_col],
+        library_mz=df[library_mz_array_col],
+        library_intensity=df[library_intensity_array_col],
+        library_precursor_mz=df[library_precursor_mz_col],
+    )
     df['precursor_diff'] = df['query_precursor_mz'] - df['library_precursor_mz']
 
-    # Convert to numpy arrays
-    for col in ['query_mz', 'query_intensity', 'library_mz', 'library_intensity']:
-        df[col] = df[col].apply(lambda x: np.asarray(x, dtype=float))
+    def score_row(row_dict):
+        q = {"mz": np.asarray(row_dict["query_mz"]), "intensity": np.asarray(row_dict["query_intensity"])}
+        l = {"mz": np.asarray(row_dict["library_mz"]), "intensity": np.asarray(row_dict["library_intensity"])}
+        return score_similarity(
+            q, l,
+            method=method,
+            mz_tol=mz_tol,
+            precursor_diff=row_dict["precursor_diff"],
+            precursor_mz1=row_dict["query_precursor_mz"],
+            precursor_mz2=row_dict["library_precursor_mz"]
+        )
 
-    total = len(df)
-    if total == 0:
-        raise ValueError("No data provided!")
+    import dask.bag as db
+    bag = db.from_sequence(df.to_dict('records'), npartitions=npartitions)
+    scored = bag.map(score_row)
 
-    # ===================== CHECKPOINT / RESUME =====================
-    if force_restart:
-        for f in [checkpoint_file, result_pkl]:
-            Path(f).unlink(missing_ok=True)
+    print(f"Computing with Dask ({npartitions} partitions, scheduler={scheduler})...")
+    results = scored.compute(scheduler=scheduler)
 
-    completed = 0
-    if Path(checkpoint_file).exists() and not force_restart:
-        try:
-            with open(checkpoint_file) as f:
-                completed = int(json.load(f).get("completed", 0))
-            print(f"Resuming from pair {completed}/{total}")
-        except:
-            completed = 0
-
-    computed: dict = {}
-    if Path(result_pkl).exists() and not force_restart:
-        try:
-            with open(result_pkl, "rb") as f:
-                computed = pickle.load(f)
-            print(f"Loaded {len(computed)} cached scores")
-        except:
-            computed = {}
-
-    def _atomic_save(data, path):
-        tmp = Path(str(path) + ".tmp")
-        with open(tmp, "wb") as f:
-            pickle.dump(data, f)
-        tmp.replace(path)
-
-    def _atomic_checkpoint(val):
-        tmp = Path(str(checkpoint_file) + ".tmp")
-        tmp.write_text(json.dumps({"completed": int(val)}))
-        tmp.replace(checkpoint_file)
-
-    # ===================== SCORING =====================
-    def _process_chunk(chunk_df, start_idx):
-        results = {}
-        for global_idx, row in chunk_df.iterrows():
-            if global_idx in computed:
-                results[global_idx] = computed[global_idx]
-                continue
-
-            q = {"mz": row["query_mz"], "intensity": row["query_intensity"]}
-            l = {"mz": row["library_mz"], "intensity": row["library_intensity"]}
-
-            scores = score_similarity(
-                q, l,
-                method=method,
-                mz_tol=mz_tol,
-                precursor_diff=row.get("precursor_diff", 0.0),
-                precursor_mz1=row["query_precursor_mz"],
-                precursor_mz2=row["library_precursor_mz"],
-            )
-            results[global_idx] = scores
-
-            if len(results) % 5000 == 0:
-                _atomic_save({**computed, **results}, result_pkl)
-                _atomic_checkpoint(start_idx + len(results))
-
-        return results
-
-    try:
-        with Parallel(n_jobs=n_jobs, backend="loky") as parallel:
-            for start in range(completed, total, chunk_size):
-                end = min(start + chunk_size, total)
-                print(f"Processing {start:,}–{end:,} / {total:,} | method={method}")
-
-                chunk = df.iloc[start:end]
-                chunk_results = parallel(delayed(_process_chunk)(chunk, start) for _ in [0])[0]
-                computed.update(chunk_results)
-
-                _atomic_save(computed, result_pkl)
-                _atomic_checkpoint(end)
-
-    except KeyboardInterrupt:
-        print("⚠️ Interrupted – saving current progress...")
-        _atomic_save(computed, result_pkl)
-        _atomic_checkpoint(max(computed.keys(), default=0) + 1)
-        raise
-    except Exception as e:
-        print(f"❌ Error occurred: {e} – progress has been saved.")
-        _atomic_save(computed, result_pkl)
-        raise
-    finally:
-        if len(computed) >= total - 1:
-            Path(checkpoint_file).unlink(missing_ok=True)
-            print("✅ All done – checkpoint cleaned.")
-
-    # ===================== RETURN =====================
     result_df = df.copy()
-    for idx, scores in computed.items():
+    for i, scores in enumerate(results):
         for k, v in scores.items():
-            result_df.at[idx, k] = v
+            result_df.at[df.index[i], k] = v
 
+    Path(checkpoint_file).unlink(missing_ok=True)
+    print("✅ Dask batch scoring finished")
+    return result_df
+
+
+# ===================================================================
+# PAIRWISE COMBINATIONS FUNCTIONS (your requested implementation)
+# ===================================================================
+def process_group_chunk(chunk, match_cols, dont_match_cols, tol_dict, id_col):
+    n = len(chunk)
+    if n < 2:
+        return []
+    chunk = chunk.reset_index(drop=True)
+    i, j = np.triu_indices(n, k=1)
+    mask = np.ones(len(i), dtype=bool)
+    
+    for col in match_cols:
+        vals = chunk[col].values
+        col_mask = (vals[i] == vals[j])
+        mask &= col_mask
+    for col in dont_match_cols:
+        vals = chunk[col].values
+        col_mask = (vals[i] != vals[j])
+        mask &= col_mask
+    for col, tol in tol_dict.items():
+        vals = chunk[col].values
+        col_mask = np.abs(vals[i] - vals[j]) <= tol
+        mask &= col_mask
+    
+    valid_i = i[mask]
+    valid_j = j[mask]
+    combined_rows = []
+    cols = chunk.columns.tolist()
+    for vi, vj in zip(valid_i, valid_j):
+        row1 = chunk.iloc[vi]
+        row2 = chunk.iloc[vj]
+        row1_dict = {k + '_1': row1[k] for k in cols}
+        row2_dict = {k + '_2': row2[k] for k in cols}
+        row1_dict[f'{id_col}_1'] = row1[id_col]
+        row2_dict[f'{id_col}_2'] = row2[id_col]
+        combined_row = {**row1_dict, **row2_dict}
+        combined_rows.append(combined_row)
+    return combined_rows
+
+
+def process_group(group, match_cols, dont_match_cols, tol_dict, id_col, chunk_size=1000):
+    n = len(group)
+    if n < 2:
+        return []
+    chunks = [group.iloc[i:i + chunk_size] for i in range(0, n, chunk_size)]
+    partial_process_chunk = partial(
+        process_group_chunk, 
+        match_cols=match_cols, 
+        dont_match_cols=dont_match_cols, 
+        tol_dict=tol_dict, 
+        id_col=id_col
+    )
+    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures = [executor.submit(partial_process_chunk, chunk) for chunk in chunks]
+        results = [future.result() for future in as_completed(futures)]
+    flat_results = [item for sublist in results for item in sublist]
+    return flat_results
+
+
+def pairwise_combinations_df(filtered_df, match_cols=None, dont_match_cols=None, 
+                             tol_dict=None, id_col='original_row_index', group_chunk_size=1000):
+    match_cols = match_cols if match_cols is not None else []
+    dont_match_cols = dont_match_cols if dont_match_cols is not None else []
+    tol_dict = tol_dict if tol_dict is not None else {}
+    all_keys = set(match_cols + dont_match_cols + list(tol_dict.keys()) + [id_col])
+    if not all_keys.issubset(filtered_df.columns):
+        raise ValueError(f"Missing columns: {all_keys - set(filtered_df.columns)}")
+    
+    if match_cols:
+        groups = [g for _, g in filtered_df.groupby(match_cols, dropna=False)]
+    else:
+        groups = [filtered_df]
+    
+    partial_process = partial(
+        process_group, 
+        match_cols=match_cols, 
+        dont_match_cols=dont_match_cols, 
+        tol_dict=tol_dict, 
+        id_col=id_col, 
+        chunk_size=group_chunk_size
+    )
+    
+    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures = [executor.submit(partial_process, g) for g in groups]
+        results = [future.result() for future in as_completed(futures)]
+    
+    flat_results = [item for sublist in results for item in sublist]
+    
+    if not flat_results:
+        return pd.DataFrame()
+    
+    chunk_size = 100000
+    df_chunks = []
+    for i in range(0, len(flat_results), chunk_size):
+        df_chunks.append(pd.DataFrame(flat_results[i:i + chunk_size]))
+    
+    result_df = pd.concat(df_chunks, ignore_index=True)
+    del flat_results, df_chunks
+    gc.collect()
     return result_df
