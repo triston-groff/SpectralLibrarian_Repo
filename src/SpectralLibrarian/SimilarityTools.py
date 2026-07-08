@@ -199,86 +199,184 @@ def score_similarity(
 # ===================================================================
 # BATCH SCORING – MILLIONS-SAFE
 # ===================================================================
-def batch_score_similarity( # AT LEAST WITH ALL_ENTROPY METHOD THERE IS PROBLEM WITH HANDLING COLUMN NAMES
-    pairs_df: pd.DataFrame,
-    method: Union[str, List[str]] = "modified_cosine",
+import os
+import json
+import pickle
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from typing import Union, List, Optional
+from joblib import Parallel, delayed
+
+def batch_score_similarity(
+    # ================== INPUT OPTIONS ==================
+    pairs_df: Optional[pd.DataFrame] = None,   # Option 1: pass DataFrame
+
+    # Column names when using pairs_df
+    query_mz_array_col: str = "mz_array_1",
+    query_intensity_array_col: str = "intensity_array_1",
+    query_precursor_mz_col: str = "PRECURSORMZ_1",
+
+    library_mz_array_col: str = "mz_array_2",
+    library_intensity_array_col: str = "intensity_array_2",
+    library_precursor_mz_col: str = "PRECURSORMZ_2",
+
+    # Option 2: Pass raw lists / arrays / Series directly (no DataFrame needed)
+    query_mz_arrays: Optional[list] = None,
+    query_intensity_arrays: Optional[list] = None,
+    query_precursor_mz: Optional[list] = None,
+    library_mz_arrays: Optional[list] = None,
+    library_intensity_arrays: Optional[list] = None,
+    library_precursor_mz: Optional[list] = None,
+
+    # ================== OTHER PARAMETERS ==================
+    method: Union[str, List[str]] = "dot_product",   # ← your requested default
     mz_tol: float = 0.02,
     n_jobs: int = -1,
     chunk_size: int = 50_000,
     checkpoint_file: str = "similarity_checkpoint.json",
     result_pkl: str = "similarity_results.pkl",
+    force_restart: bool = False,
 ) -> pd.DataFrame:
     """
-    Batch scoring with full checkpointing and crash recovery.
-    Survives crashes, resumes automatically, never loads full matrix.
+    Fully flexible batch similarity scorer.
+    - Accepts either a DataFrame + column names OR raw lists/arrays directly.
+    - Default method is now "dot_product".
     """
-    df = pairs_df.copy()
+    # ===================== BUILD INTERNAL DF =====================
+    if pairs_df is not None:
+        df = pairs_df.copy()
+        df = df.assign(
+            query_mz=df[query_mz_array_col],
+            query_intensity=df[query_intensity_array_col],
+            query_precursor_mz=df[query_precursor_mz_col],
+            library_mz=df[library_mz_array_col],
+            library_intensity=df[library_intensity_array_col],
+            library_precursor_mz=df[library_precursor_mz_col],
+        )
+    else:
+        # Build from raw arrays/lists
+        df = pd.DataFrame()
+        if query_mz_arrays is not None:
+            df['query_mz'] = pd.Series(query_mz_arrays)
+        if query_intensity_arrays is not None:
+            df['query_intensity'] = pd.Series(query_intensity_arrays)
+        if query_precursor_mz is not None:
+            df['query_precursor_mz'] = pd.Series(query_precursor_mz)
+        else:
+            df['query_precursor_mz'] = 0.0
+
+        if library_mz_arrays is not None:
+            df['library_mz'] = pd.Series(library_mz_arrays)
+        if library_intensity_arrays is not None:
+            df['library_intensity'] = pd.Series(library_intensity_arrays)
+        if library_precursor_mz is not None:
+            df['library_precursor_mz'] = pd.Series(library_precursor_mz)
+        else:
+            df['library_precursor_mz'] = 0.0
+
+    df['precursor_diff'] = df['query_precursor_mz'] - df['library_precursor_mz']
+
+    # Convert to numpy arrays
+    for col in ['query_mz', 'query_intensity', 'library_mz', 'library_intensity']:
+        df[col] = df[col].apply(lambda x: np.asarray(x, dtype=float))
+
     total = len(df)
+    if total == 0:
+        raise ValueError("No data provided!")
 
-    # Load checkpoint
+    # ===================== CHECKPOINT / RESUME =====================
+    if force_restart:
+        for f in [checkpoint_file, result_pkl]:
+            Path(f).unlink(missing_ok=True)
+
     completed = 0
-    if Path(checkpoint_file).exists():
-        with open(checkpoint_file) as f:
-            completed = json.load(f).get("completed", 0)
-        print(f"Resuming from pair {completed}/{total}")
+    if Path(checkpoint_file).exists() and not force_restart:
+        try:
+            with open(checkpoint_file) as f:
+                completed = int(json.load(f).get("completed", 0))
+            print(f"Resuming from pair {completed}/{total}")
+        except:
+            completed = 0
 
-    # Load existing results
-    computed: Dict[int, Dict[str, float]] = {}
-    if Path(result_pkl).exists():
-        with open(result_pkl, "rb") as f:
-            computed = pickle.load(f)
+    computed: dict = {}
+    if Path(result_pkl).exists() and not force_restart:
+        try:
+            with open(result_pkl, "rb") as f:
+                computed = pickle.load(f)
+            print(f"Loaded {len(computed)} cached scores")
+        except:
+            computed = {}
 
-    def _process_chunk(chunk_df: pd.DataFrame, start_idx: int):
+    def _atomic_save(data, path):
+        tmp = Path(str(path) + ".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(data, f)
+        tmp.replace(path)
+
+    def _atomic_checkpoint(val):
+        tmp = Path(str(checkpoint_file) + ".tmp")
+        tmp.write_text(json.dumps({"completed": int(val)}))
+        tmp.replace(checkpoint_file)
+
+    # ===================== SCORING =====================
+    def _process_chunk(chunk_df, start_idx):
         results = {}
         for global_idx, row in chunk_df.iterrows():
             if global_idx in computed:
                 results[global_idx] = computed[global_idx]
                 continue
 
-            q = {"mz": row.query_mz, "intensity": row.query_intensity}
-            l = {"mz": row.library_mz, "intensity": row.library_intensity}
-            diff = row.precursor_diff if "precursor_diff" in row else row.query_precursor_mz - row.library_precursor_mz
+            q = {"mz": row["query_mz"], "intensity": row["query_intensity"]}
+            l = {"mz": row["library_mz"], "intensity": row["library_intensity"]}
 
             scores = score_similarity(
                 q, l,
                 method=method,
                 mz_tol=mz_tol,
-                precursor_diff=diff,
-                precursor_mz1=row.query_precursor_mz,
-                precursor_mz2=row.library_precursor_mz,
+                precursor_diff=row.get("precursor_diff", 0.0),
+                precursor_mz1=row["query_precursor_mz"],
+                precursor_mz2=row["library_precursor_mz"],
             )
             results[global_idx] = scores
 
-            # Save every 10k
-            if len(results) % 10_000 == 0:
-                with open(result_pkl, "wb") as f:
-                    pickle.dump({**computed, **results}, f)
-                with open(checkpoint_file, "w") as f:
-                    json.dump({"completed": global_idx + 1}, f)
+            if len(results) % 5000 == 0:
+                _atomic_save({**computed, **results}, result_pkl)
+                _atomic_checkpoint(start_idx + len(results))
 
         return results
 
-    # Main chunked loop
-    with Parallel(n_jobs=n_jobs, backend="loky") as parallel:
-        for chunk_start in range(completed, total, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, total)
-            chunk = df.iloc[chunk_start:chunk_end]
-            chunk_results = parallel(delayed(_process_chunk)(chunk, chunk_start) for _ in [0])[0]
-            computed.update(chunk_results)
+    try:
+        with Parallel(n_jobs=n_jobs, backend="loky") as parallel:
+            for start in range(completed, total, chunk_size):
+                end = min(start + chunk_size, total)
+                print(f"Processing {start:,}–{end:,} / {total:,} | method={method}")
 
-            # Update checkpoint
-            with open(checkpoint_file, "w") as f:
-                json.dump({"completed": chunk_end}, f)
+                chunk = df.iloc[start:end]
+                chunk_results = parallel(delayed(_process_chunk)(chunk, start) for _ in [0])[0]
+                computed.update(chunk_results)
 
-    # Final merge
+                _atomic_save(computed, result_pkl)
+                _atomic_checkpoint(end)
+
+    except KeyboardInterrupt:
+        print("⚠️ Interrupted – saving current progress...")
+        _atomic_save(computed, result_pkl)
+        _atomic_checkpoint(max(computed.keys(), default=0) + 1)
+        raise
+    except Exception as e:
+        print(f"❌ Error occurred: {e} – progress has been saved.")
+        _atomic_save(computed, result_pkl)
+        raise
+    finally:
+        if len(computed) >= total - 1:
+            Path(checkpoint_file).unlink(missing_ok=True)
+            print("✅ All done – checkpoint cleaned.")
+
+    # ===================== RETURN =====================
     result_df = df.copy()
     for idx, scores in computed.items():
         for k, v in scores.items():
-            if k not in result_df.columns:
-                result_df[k] = np.nan
             result_df.at[idx, k] = v
-
-    # Clean up
-    Path(checkpoint_file).unlink(missing_ok=True)
 
     return result_df
