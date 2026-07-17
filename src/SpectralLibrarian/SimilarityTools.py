@@ -3,15 +3,9 @@ from __future__ import annotations
 
 """
 SimilarityTools – Ultra-fast, publication-grade spectral similarity scoring
-
-Features:
-    • score_similarity(spec1, spec2, method=…) – single pair
-    • batch_score_similarity(pairs_df, …) – millions-safe, Dask-powered, checkpointed
 """
 
 import os
-import json
-import pickle
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -34,7 +28,7 @@ except ImportError:
     HAS_ENTROPY = False
     warnings.warn("spectral_entropy not installed – entropy metrics disabled")
 
-# ====================== matchms import (robust version) ======================
+# ====================== Robust matchms import ======================
 HAS_MATCHMS = False
 MatchmsSpectrum = None
 CosineGreedy = None
@@ -46,24 +40,20 @@ try:
     from matchms import Spectrum as MatchmsSpectrum
     from matchms.similarity import CosineGreedy, CosineHungarian
 
-    # Try modern names first
     try:
         from matchms.similarity import ModifiedCosineGreedy, ModifiedCosineHungarian
     except ImportError:
-        # Fallback for older matchms (<= 0.31)
         try:
             from matchms.similarity import ModifiedCosine as _ModCos
             ModifiedCosineGreedy = _ModCos
-            ModifiedCosineHungarian = None
         except ImportError:
             ModifiedCosineGreedy = None
+        ModifiedCosineHungarian = None
 
     HAS_MATCHMS = True
-
 except ImportError:
     warnings.warn("matchms not installed – matchms similarity methods disabled")
 
-# Dask for large-scale batch scoring
 import dask.bag as db
 
 
@@ -82,14 +72,8 @@ def score_similarity(
     intensity_power: float = 1.0,
 ) -> Dict[str, float]:
     """
-    Compute spectral similarity between two spectra.
-
-    Supports:
-        - 'modified_cosine_greedy'     (fast, recommended)
-        - 'modified_cosine_hungarian'  (exact optimal assignment)
-        - 'modified_cosine'            (alias for greedy)
-        - matchms versions when available
-        - entropy family via spectral_entropy
+    Compute one or more spectral similarity scores between two spectra.
+    Accepts any combination of method names.
     """
     from .SpectralTools import standardize_spectrum
 
@@ -108,141 +92,85 @@ def score_similarity(
     else:
         methods = method
 
-    # ------------------------------------------------------------------
-    # CUSTOM IMPLEMENTATIONS
-    # ------------------------------------------------------------------
-    def _modified_cosine_greedy(
-        q_mz, q_int, l_mz, l_int, delta, mz_tol, mz_power, intensity_power
-    ):
-        if len(q_mz) == 0 or len(l_mz) == 0:
-            return 0.0, 0
+    # Define method categories
+    CUSTOM_METHODS = {"modified_cosine", "modified_cosine_greedy", "modified_cosine_hungarian"}
+    MATCHMS_METHODS = {m for m in methods if m.startswith("matchms_")}
 
+    # ------------------------------------------------------------------
+    # 1. Custom Modified Cosine implementations
+    # ------------------------------------------------------------------
+    def _modified_cosine_greedy(q_mz, q_int, l_mz, l_int, delta, mz_tol, mz_power, intensity_power):
+        if len(q_mz) == 0 or len(l_mz) == 0:
+            return 0.0
         q_w = (q_mz ** mz_power) * (q_int ** intensity_power)
         l_w = (l_mz ** mz_power) * (l_int ** intensity_power)
+        norm_q = np.sqrt(np.sum(q_w ** 2)) or 1.0
+        norm_l = np.sqrt(np.sum(l_w ** 2)) or 1.0
 
-        norm_q = np.sqrt(np.sum(q_w ** 2))
-        norm_l = np.sqrt(np.sum(l_w ** 2))
-        if norm_q == 0 or norm_l == 0:
-            return 0.0, 0
-
-        # Direct candidates
         cost_d = np.abs(q_mz[:, None] - l_mz[None, :])
         i_d, j_d = np.where(cost_d <= mz_tol)
         prods_d = q_w[i_d] * l_w[j_d]
 
-        # Shifted candidates
         l_shift = l_mz + delta
         cost_s = np.abs(q_mz[:, None] - l_shift[None, :])
         i_s, j_s = np.where(cost_s <= mz_tol)
         prods_s = q_w[i_s] * l_w[j_s]
 
-        candidates = []
-        for ii, jj, pr in zip(i_d, j_d, prods_d):
-            candidates.append((float(pr), int(ii), int(jj)))
-        for ii, jj, pr in zip(i_s, j_s, prods_s):
-            candidates.append((float(pr), int(ii), int(jj)))
+        candidates = [(float(pr), int(ii), int(jj)) for ii, jj, pr in zip(i_d, j_d, prods_d)]
+        candidates += [(float(pr), int(ii), int(jj)) for ii, jj, pr in zip(i_s, j_s, prods_s)]
 
         if not candidates:
-            return 0.0, 0
-
+            return 0.0
         candidates.sort(key=lambda x: x[0], reverse=True)
 
         used_q, used_l = set(), set()
         numer = 0.0
-        n_matches = 0
         for pr, i, j in candidates:
             if i not in used_q and j not in used_l:
                 used_q.add(i)
                 used_l.add(j)
                 numer += pr
-                n_matches += 1
+        return numer / (norm_q * norm_l)
 
-        score = numer / (norm_q * norm_l)
-        return float(score), n_matches
-
-    def _modified_cosine_hungarian(
-        q_mz, q_int, l_mz, l_int, delta, mz_tol, mz_power, intensity_power
-    ):
+    def _modified_cosine_hungarian(q_mz, q_int, l_mz, l_int, delta, mz_tol, mz_power, intensity_power):
         if len(q_mz) == 0 or len(l_mz) == 0:
-            return 0.0, 0
-
+            return 0.0
         q_w = (q_mz ** mz_power) * (q_int ** intensity_power)
         l_w = (l_mz ** mz_power) * (l_int ** intensity_power)
-
-        norm_q = np.sqrt(np.sum(q_w ** 2))
-        norm_l = np.sqrt(np.sum(l_w ** 2))
-        if norm_q == 0 or norm_l == 0:
-            return 0.0, 0
+        norm_q = np.sqrt(np.sum(q_w ** 2)) or 1.0
+        norm_l = np.sqrt(np.sum(l_w ** 2)) or 1.0
 
         l_shift = l_mz + delta
-        cost_direct = np.abs(q_mz[:, None] - l_mz[None, :])
-        cost_shift  = np.abs(q_mz[:, None] - l_shift[None, :])
-        min_cost    = np.minimum(cost_direct, cost_shift)
-
-        prod_matrix = q_w[:, None] * l_w[None, :]
-
-        assign_cost = np.where(min_cost <= mz_tol, -prod_matrix, 1e10)
+        cost = np.minimum(np.abs(q_mz[:, None] - l_mz[None, :]),
+                          np.abs(q_mz[:, None] - l_shift[None, :]))
+        prod = q_w[:, None] * l_w[None, :]
+        assign_cost = np.where(cost <= mz_tol, -prod, 1e10)
 
         row_ind, col_ind = linear_sum_assignment(assign_cost)
+        valid = cost[row_ind, col_ind] <= mz_tol
+        numer = np.sum(prod[row_ind[valid], col_ind[valid]]) if valid.any() else 0.0
+        return numer / (norm_q * norm_l)
 
-        valid = min_cost[row_ind, col_ind] <= mz_tol
-        numer = np.sum(prod_matrix[row_ind[valid], col_ind[valid]]) if valid.any() else 0.0
-
-        score = numer / (norm_q * norm_l)
-        n_matches = int(valid.sum())
-        return float(score), n_matches
-
-    # Dispatch custom methods
     for m in methods:
         if m in ("modified_cosine", "modified_cosine_greedy"):
-            score, _ = _modified_cosine_greedy(
+            scores[m if m != "modified_cosine" else "modified_cosine"] = _modified_cosine_greedy(
                 q_mz, q_int, l_mz, l_int, precursor_diff, mz_tol, mz_power, intensity_power
             )
-            scores[m if m != "modified_cosine" else "modified_cosine"] = score
-
         elif m == "modified_cosine_hungarian":
-            score, _ = _modified_cosine_hungarian(
+            scores[m] = _modified_cosine_hungarian(
                 q_mz, q_int, l_mz, l_int, precursor_diff, mz_tol, mz_power, intensity_power
             )
-            scores[m] = score
 
     # ------------------------------------------------------------------
-    # ENTROPY FAMILY
+    # 2. matchms methods
     # ------------------------------------------------------------------
-    if HAS_ENTROPY and any(m not in ("modified_cosine", "modified_cosine_greedy", "modified_cosine_hungarian") for m in methods):
-        q_arr = np.column_stack([q_mz, q_int])
-        l_arr = np.column_stack([l_mz, l_int])
-
-        entropy_methods = [m for m in methods if m not in ("modified_cosine", "modified_cosine_greedy", "modified_cosine_hungarian")]
-
-        if "all_entropy" in entropy_methods:
-            entropy_scores = all_similarity(q_arr, l_arr, ms2_ppm=mz_tol * 1e6)
-            scores.update(entropy_scores)
-        elif len(entropy_methods) == 1:
-            try:
-                scores[entropy_methods[0]] = similarity(
-                    q_arr, l_arr, method=entropy_methods[0], ms2_ppm=mz_tol * 1e6
-                )
-            except Exception:
-                pass
-        elif len(entropy_methods) > 1:
-            try:
-                entropy_scores = multiple_similarity(q_arr, l_arr, methods=entropy_methods, ms2_ppm=mz_tol * 1e6)
-                scores.update(entropy_scores)
-            except Exception:
-                pass
-
-    # ------------------------------------------------------------------
-    # MATCHMS VERSIONS
-    # ------------------------------------------------------------------
-    if HAS_MATCHMS:
+    if HAS_MATCHMS and MATCHMS_METHODS:
         q_meta = {"precursor_mz": precursor_mz1} if precursor_mz1 is not None else {}
         l_meta = {"precursor_mz": precursor_mz2} if precursor_mz2 is not None else {}
-
         q_sp = MatchmsSpectrum(mz=q_mz, intensities=q_int, metadata=q_meta)
         l_sp = MatchmsSpectrum(mz=l_mz, intensities=l_int, metadata=l_meta)
 
-        if "matchms_cosine_greedy" in methods and CosineGreedy is not None:
+        if "matchms_cosine_greedy" in methods and CosineGreedy:
             try:
                 scores["matchms_cosine_greedy"] = CosineGreedy(
                     tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
@@ -250,15 +178,7 @@ def score_similarity(
             except Exception:
                 pass
 
-        if "matchms_cosine_hungarian" in methods and CosineHungarian is not None:
-            try:
-                scores["matchms_cosine_hungarian"] = CosineHungarian(
-                    tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
-                ).pair(q_sp, l_sp)["score"]
-            except Exception:
-                pass
-
-        if ("matchms_modified_cosine_greedy" in methods or "matchms_modified_cosine" in methods) and ModifiedCosineGreedy is not None:
+        if "matchms_modified_cosine_greedy" in methods and ModifiedCosineGreedy:
             try:
                 scores["matchms_modified_cosine_greedy"] = ModifiedCosineGreedy(
                     tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
@@ -266,7 +186,7 @@ def score_similarity(
             except Exception:
                 pass
 
-        if "matchms_modified_cosine_hungarian" in methods and ModifiedCosineHungarian is not None:
+        if "matchms_modified_cosine_hungarian" in methods and ModifiedCosineHungarian:
             try:
                 scores["matchms_modified_cosine_hungarian"] = ModifiedCosineHungarian(
                     tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
@@ -274,11 +194,41 @@ def score_similarity(
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
+    # 3. spectral_entropy methods (smart dispatching)
+    # ------------------------------------------------------------------
+    if HAS_ENTROPY:
+        # Everything that is not custom or matchms goes to spectral_entropy
+        entropy_methods = [
+            m for m in methods
+            if m not in CUSTOM_METHODS and not m.startswith("matchms_")
+        ]
+
+        if entropy_methods:
+            q_arr = np.column_stack([q_mz, q_int])
+            l_arr = np.column_stack([l_mz, l_int])
+
+            # Try multiple_similarity first (more efficient)
+            try:
+                entropy_scores = multiple_similarity(
+                    q_arr, l_arr, methods=entropy_methods, ms2_ppm=mz_tol * 1e6
+                )
+                scores.update(entropy_scores)
+            except Exception:
+                # Fallback: call one by one
+                for m in entropy_methods:
+                    try:
+                        scores[m] = similarity(
+                            q_arr, l_arr, method=m, ms2_ppm=mz_tol * 1e6
+                        )
+                    except Exception:
+                        scores[m] = np.nan   # Mark as failed
+
     return scores
 
 
 # ===================================================================
-# DASK-BASED BATCH SCORING – FIXED VERSION
+# DASK BATCH SCORING (Fixed)
 # ===================================================================
 def batch_score_similarity(
     pairs_df: Optional[pd.DataFrame] = None,
@@ -298,7 +248,6 @@ def batch_score_similarity(
     result_pkl: str = "similarity_results.pkl",
     force_restart: bool = False,
 ) -> pd.DataFrame:
-    """Dask-powered batch scorer for millions of rows."""
     if pairs_df is None:
         raise ValueError("pairs_df is required")
 
@@ -334,8 +283,8 @@ def batch_score_similarity(
     results = scored.compute(scheduler=scheduler)
 
     result_df = df.copy()
-    for i, scores in enumerate(results):
-        for k, v in scores.items():
+    for i, sc in enumerate(results):
+        for k, v in sc.items():
             result_df.at[df.index[i], k] = v
 
     Path(checkpoint_file).unlink(missing_ok=True)
@@ -344,7 +293,7 @@ def batch_score_similarity(
 
 
 # ===================================================================
-# PAIRWISE COMBINATIONS FUNCTIONS
+# PAIRWISE FUNCTIONS (unchanged)
 # ===================================================================
 def process_group_chunk(chunk, match_cols, dont_match_cols, tol_dict, id_col):
     n = len(chunk)
@@ -353,20 +302,16 @@ def process_group_chunk(chunk, match_cols, dont_match_cols, tol_dict, id_col):
     chunk = chunk.reset_index(drop=True)
     i, j = np.triu_indices(n, k=1)
     mask = np.ones(len(i), dtype=bool)
-    
     for col in match_cols:
         vals = chunk[col].values
-        col_mask = (vals[i] == vals[j])
-        mask &= col_mask
+        mask &= (vals[i] == vals[j])
     for col in dont_match_cols:
         vals = chunk[col].values
-        col_mask = (vals[i] != vals[j])
-        mask &= col_mask
+        mask &= (vals[i] != vals[j])
     for col, tol in tol_dict.items():
         vals = chunk[col].values
-        col_mask = np.abs(vals[i] - vals[j]) <= tol
-        mask &= col_mask
-    
+        mask &= (np.abs(vals[i] - vals[j]) <= tol)
+
     valid_i = i[mask]
     valid_j = j[mask]
     combined_rows = []
@@ -378,8 +323,7 @@ def process_group_chunk(chunk, match_cols, dont_match_cols, tol_dict, id_col):
         row2_dict = {k + '_2': row2[k] for k in cols}
         row1_dict[f'{id_col}_1'] = row1[id_col]
         row2_dict[f'{id_col}_2'] = row2[id_col]
-        combined_row = {**row1_dict, **row2_dict}
-        combined_rows.append(combined_row)
+        combined_rows.append({**row1_dict, **row2_dict})
     return combined_rows
 
 
@@ -388,57 +332,38 @@ def process_group(group, match_cols, dont_match_cols, tol_dict, id_col, chunk_si
     if n < 2:
         return []
     chunks = [group.iloc[i:i + chunk_size] for i in range(0, n, chunk_size)]
-    partial_process_chunk = partial(
-        process_group_chunk, 
-        match_cols=match_cols, 
-        dont_match_cols= dont_match_cols, 
-        tol_dict=tol_dict, 
-        id_col=id_col
-    )
+    partial_process_chunk = partial(process_group_chunk, match_cols=match_cols,
+                                    dont_match_cols=dont_match_cols, tol_dict=tol_dict, id_col=id_col)
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = [executor.submit(partial_process_chunk, chunk) for chunk in chunks]
         results = [future.result() for future in as_completed(futures)]
-    flat_results = [item for sublist in results for item in sublist]
-    return flat_results
+    return [item for sublist in results for item in sublist]
 
 
-def pairwise_combinations_df(filtered_df, match_cols=None, dont_match_cols=None, 
+def pairwise_combinations_df(filtered_df, match_cols=None, dont_match_cols=None,
                              tol_dict=None, id_col='original_row_index', group_chunk_size=1000):
-    match_cols = match_cols if match_cols is not None else []
-    dont_match_cols = dont_match_cols if dont_match_cols is not None else []
-    tol_dict = tol_dict if tol_dict is not None else {}
+    match_cols = match_cols or []
+    dont_match_cols = dont_match_cols or []
+    tol_dict = tol_dict or {}
     all_keys = set(match_cols + dont_match_cols + list(tol_dict.keys()) + [id_col])
     if not all_keys.issubset(filtered_df.columns):
         raise ValueError(f"Missing columns: {all_keys - set(filtered_df.columns)}")
-    
-    if match_cols:
-        groups = [g for _, g in filtered_df.groupby(match_cols, dropna=False)]
-    else:
-        groups = [filtered_df]
-    
-    partial_process = partial(
-        process_group, 
-        match_cols=match_cols, 
-        dont_match_cols=dont_match_cols, 
-        tol_dict=tol_dict, 
-        id_col=id_col, 
-        chunk_size=group_chunk_size
-    )
-    
+
+    groups = [g for _, g in filtered_df.groupby(match_cols, dropna=False)] if match_cols else [filtered_df]
+
+    partial_process = partial(process_group, match_cols=match_cols, dont_match_cols=dont_match_cols,
+                              tol_dict=tol_dict, id_col=id_col, chunk_size=group_chunk_size)
+
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = [executor.submit(partial_process, g) for g in groups]
         results = [future.result() for future in as_completed(futures)]
-    
+
     flat_results = [item for sublist in results for item in sublist]
-    
     if not flat_results:
         return pd.DataFrame()
-    
+
     chunk_size = 100000
-    df_chunks = []
-    for i in range(0, len(flat_results), chunk_size):
-        df_chunks.append(pd.DataFrame(flat_results[i:i + chunk_size]))
-    
+    df_chunks = [pd.DataFrame(flat_results[i:i + chunk_size]) for i in range(0, len(flat_results), chunk_size)]
     result_df = pd.concat(df_chunks, ignore_index=True)
     del flat_results, df_chunks
     gc.collect()
