@@ -34,16 +34,19 @@ except ImportError:
     HAS_ENTROPY = False
     warnings.warn("spectral_entropy not installed – entropy metrics disabled")
 
-# matchms
+# matchms (updated for modern versions)
 try:
     from matchms import Spectrum as MatchmsSpectrum
     from matchms.similarity import (
         CosineGreedy,
-        ModifiedCosine,
+        CosineHungarian,
+        ModifiedCosineGreedy,
+        ModifiedCosineHungarian,
     )
     HAS_MATCHMS = True
 except ImportError:
     HAS_MATCHMS = False
+    warnings.warn("matchms not installed – matchms similarity methods disabled")
 
 # Dask for large-scale batch scoring
 import dask.bag as db
@@ -55,59 +58,216 @@ def score_similarity(
     spec1: Dict[str, np.ndarray],
     spec2: Dict[str, np.ndarray],
     method: Union[str, List[str]] = "modified_cosine",
-    mz_tol: float = 0.02,
+    mz_tol: float = 0.1,
     precursor_diff: float = 0.0,
     precursor_mz1: float = None,
     precursor_mz2: float = None,
+    mz_power: float = 0.0,
+    intensity_power: float = 1.0,
 ) -> Dict[str, float]:
+    """
+    Compute spectral similarity between two spectra.
+
+    Supports:
+        - 'modified_cosine_greedy'     (fast, recommended)
+        - 'modified_cosine_hungarian'  (exact optimal assignment)
+        - 'modified_cosine'            (alias for greedy)
+        - matchms versions when available
+        - entropy family via spectral_entropy
+    """
     from .SpectralTools import standardize_spectrum
 
     spec1 = standardize_spectrum(spec1)
     spec2 = standardize_spectrum(spec2)
 
-    q_mz, q_int = spec1["mz"], spec1["intensity"]
-    l_mz, l_int = spec2["mz"], spec2["intensity"]
+    q_mz  = np.asarray(spec1["mz"]).ravel()
+    q_int = np.asarray(spec1["intensity"]).ravel()
+    l_mz  = np.asarray(spec2["mz"]).ravel()
+    l_int = np.asarray(spec2["intensity"]).ravel()
 
-    scores = {}
+    scores: Dict[str, float] = {}
 
     if isinstance(method, str):
         methods = [method]
     else:
         methods = method
 
-    if "modified_cosine" in methods:
-        dot = np.sum(q_int * l_int)
-        l_shift = l_mz + precursor_diff
-        cost = np.abs(q_mz[:, None] - l_mz[None, :])
-        cost_shift = np.abs(q_mz[:, None] - l_shift[None, :])
-        cost_comb = np.minimum(cost, cost_shift)
-        row_ind, col_ind = linear_sum_assignment(cost_comb)
-        mask = cost_comb[row_ind, col_ind] <= mz_tol
-        mod_dot = np.sum(q_int[row_ind[mask]] * l_int[col_ind[mask]]) if mask.any() else 0.0
-        scores["modified_cosine"] = max(dot, mod_dot)
+    # ------------------------------------------------------------------
+    # CUSTOM IMPLEMENTATIONS (no external dependency beyond numpy/scipy)
+    # ------------------------------------------------------------------
+    def _modified_cosine_greedy(
+        q_mz, q_int, l_mz, l_int, delta, mz_tol, mz_power, intensity_power
+    ):
+        if len(q_mz) == 0 or len(l_mz) == 0:
+            return 0.0, 0
 
-    if HAS_ENTROPY and any(m != "modified_cosine" for m in methods):
+        q_w = (q_mz ** mz_power) * (q_int ** intensity_power)
+        l_w = (l_mz ** mz_power) * (l_int ** intensity_power)
+
+        norm_q = np.sqrt(np.sum(q_w ** 2))
+        norm_l = np.sqrt(np.sum(l_w ** 2))
+        if norm_q == 0 or norm_l == 0:
+            return 0.0, 0
+
+        # Direct candidates
+        cost_d = np.abs(q_mz[:, None] - l_mz[None, :])
+        i_d, j_d = np.where(cost_d <= mz_tol)
+        prods_d = q_w[i_d] * l_w[j_d]
+
+        # Shifted candidates
+        l_shift = l_mz + delta
+        cost_s = np.abs(q_mz[:, None] - l_shift[None, :])
+        i_s, j_s = np.where(cost_s <= mz_tol)
+        prods_s = q_w[i_s] * l_w[j_s]
+
+        # Combine all candidates
+        candidates = []
+        for ii, jj, pr in zip(i_d, j_d, prods_d):
+            candidates.append((float(pr), int(ii), int(jj)))
+        for ii, jj, pr in zip(i_s, j_s, prods_s):
+            candidates.append((float(pr), int(ii), int(jj)))
+
+        if not candidates:
+            return 0.0, 0
+
+        # Greedy: highest product first, no peak reuse
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        used_q, used_l = set(), set()
+        numer = 0.0
+        n_matches = 0
+        for pr, i, j in candidates:
+            if i not in used_q and j not in used_l:
+                used_q.add(i)
+                used_l.add(j)
+                numer += pr
+                n_matches += 1
+
+        score = numer / (norm_q * norm_l)
+        return float(score), n_matches
+
+    def _modified_cosine_hungarian(
+        q_mz, q_int, l_mz, l_int, delta, mz_tol, mz_power, intensity_power
+    ):
+        if len(q_mz) == 0 or len(l_mz) == 0:
+            return 0.0, 0
+
+        q_w = (q_mz ** mz_power) * (q_int ** intensity_power)
+        l_w = (l_mz ** mz_power) * (l_int ** intensity_power)
+
+        norm_q = np.sqrt(np.sum(q_w ** 2))
+        norm_l = np.sqrt(np.sum(l_w ** 2))
+        if norm_q == 0 or norm_l == 0:
+            return 0.0, 0
+
+        # Build assignment cost matrix (we maximize product → minimize negative)
+        l_shift = l_mz + delta
+        cost_direct = np.abs(q_mz[:, None] - l_mz[None, :])
+        cost_shift  = np.abs(q_mz[:, None] - l_shift[None, :])
+        min_cost    = np.minimum(cost_direct, cost_shift)
+
+        prod_matrix = q_w[:, None] * l_w[None, :]
+
+        # Only consider pairs within tolerance
+        assign_cost = np.where(min_cost <= mz_tol, -prod_matrix, 1e10)
+
+        row_ind, col_ind = linear_sum_assignment(assign_cost)
+
+        valid = min_cost[row_ind, col_ind] <= mz_tol
+        numer = np.sum(prod_matrix[row_ind[valid], col_ind[valid]]) if valid.any() else 0.0
+
+        score = numer / (norm_q * norm_l)
+        n_matches = int(valid.sum())
+        return float(score), n_matches
+
+    # Dispatch custom methods
+    for m in methods:
+        if m in ("modified_cosine", "modified_cosine_greedy"):
+            score, _ = _modified_cosine_greedy(
+                q_mz, q_int, l_mz, l_int, precursor_diff, mz_tol, mz_power, intensity_power
+            )
+            scores[m if m != "modified_cosine" else "modified_cosine"] = score
+
+        elif m == "modified_cosine_hungarian":
+            score, _ = _modified_cosine_hungarian(
+                q_mz, q_int, l_mz, l_int, precursor_diff, mz_tol, mz_power, intensity_power
+            )
+            scores[m] = score
+
+    # ------------------------------------------------------------------
+    # ENTROPY FAMILY (via spectral_entropy)
+    # ------------------------------------------------------------------
+    if HAS_ENTROPY and any(m not in ("modified_cosine", "modified_cosine_greedy", "modified_cosine_hungarian") for m in methods):
         q_arr = np.column_stack([q_mz, q_int])
         l_arr = np.column_stack([l_mz, l_int])
 
-        entropy_methods = [m for m in methods if m != "modified_cosine"]
+        entropy_methods = [m for m in methods if m not in ("modified_cosine", "modified_cosine_greedy", "modified_cosine_hungarian")]
 
         if "all_entropy" in entropy_methods:
             entropy_scores = all_similarity(q_arr, l_arr, ms2_ppm=mz_tol * 1e6)
             scores.update(entropy_scores)
         elif len(entropy_methods) == 1:
-            scores[entropy_methods[0]] = similarity(q_arr, l_arr, method=entropy_methods[0], ms2_ppm=mz_tol * 1e6)
+            try:
+                scores[entropy_methods[0]] = similarity(
+                    q_arr, l_arr, method=entropy_methods[0], ms2_ppm=mz_tol * 1e6
+                )
+            except Exception:
+                pass
         elif len(entropy_methods) > 1:
-            entropy_scores = multiple_similarity(q_arr, l_arr, methods=entropy_methods, ms2_ppm=mz_tol * 1e6)
-            scores.update(entropy_scores)
+            try:
+                entropy_scores = multiple_similarity(q_arr, l_arr, methods=entropy_methods, ms2_ppm=mz_tol * 1e6)
+                scores.update(entropy_scores)
+            except Exception:
+                pass
 
+    # ------------------------------------------------------------------
+    # MATCHMS VERSIONS (fixed precursor_mz handling)
+    # ------------------------------------------------------------------
     if HAS_MATCHMS:
-        q_sp = MatchmsSpectrum(mz=q_mz, intensities=q_int)
-        l_sp = MatchmsSpectrum(mz=l_mz, intensities=l_int)
+        q_meta = {"precursor_mz": precursor_mz1} if precursor_mz1 is not None else {}
+        l_meta = {"precursor_mz": precursor_mz2} if precursor_mz2 is not None else {}
+
+        q_sp = MatchmsSpectrum(mz=q_mz, intensities=q_int, metadata=q_meta)
+        l_sp = MatchmsSpectrum(mz=l_mz, intensities=l_int, metadata=l_meta)
+
         if "matchms_cosine_greedy" in methods:
-            scores["matchms_cosine_greedy"] = CosineGreedy(tolerance=mz_tol).pair(q_sp, l_sp)["score"]
-        if "matchms_modified_cosine" in methods:
-            scores["matchms_modified_cosine"] = ModifiedCosine(tolerance=mz_tol).pair(q_sp, l_sp)["score"]
+            try:
+                scores["matchms_cosine_greedy"] = CosineGreedy(
+                    tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
+                ).pair(q_sp, l_sp)["score"]
+            except Exception:
+                pass
+
+        if "matchms_cosine_hungarian" in methods:
+            try:
+                scores["matchms_cosine_hungarian"] = CosineHungarian(
+                    tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
+                ).pair(q_sp, l_sp)["score"]
+            except Exception:
+                pass
+
+        if "matchms_modified_cosine_greedy" in methods or "matchms_modified_cosine" in methods:
+            try:
+                scores["matchms_modified_cosine_greedy"] = ModifiedCosineGreedy(
+                    tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
+                ).pair(q_sp, l_sp)["score"]
+            except Exception:
+                # Fallback for older matchms that only had ModifiedCosine
+                try:
+                    from matchms.similarity import ModifiedCosine
+                    scores["matchms_modified_cosine"] = ModifiedCosine(
+                        tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
+                    ).pair(q_sp, l_sp)["score"]
+                except Exception:
+                    pass
+
+        if "matchms_modified_cosine_hungarian" in methods:
+            try:
+                scores["matchms_modified_cosine_hungarian"] = ModifiedCosineHungarian(
+                    tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
+                ).pair(q_sp, l_sp)["score"]
+            except Exception:
+                pass
 
     return scores
 
