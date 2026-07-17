@@ -283,8 +283,10 @@ def batch_score_similarity(
     library_mz_array_col: str = "mz_array_2",
     library_intensity_array_col: str = "intensity_array_2",
     library_precursor_mz_col: str = "PRECURSORMZ_2",
-    method: Union[str, List[str]] = "dot_product",
-    mz_tol: float = 0.02,
+    method: Union[str, List[str]] = "modified_cosine_greedy",   # changed default
+    mz_tol: float = 0.1,
+    mz_power: float = 0.0,           # NEW
+    intensity_power: float = 1.0,    # NEW
     npartitions: int = 64,
     scheduler: str = "processes",
     checkpoint_file: str = "similarity_checkpoint.json",
@@ -309,14 +311,16 @@ def batch_score_similarity(
     def score_row(row_dict):
         q = {"mz": np.asarray(row_dict["query_mz"]), "intensity": np.asarray(row_dict["query_intensity"])}
         l = {"mz": np.asarray(row_dict["library_mz"]), "intensity": np.asarray(row_dict["library_intensity"])}
-        return score_similarity(
+    return score_similarity(
             q, l,
             method=method,
             mz_tol=mz_tol,
             precursor_diff=row_dict["precursor_diff"],
             precursor_mz1=row_dict["query_precursor_mz"],
-            precursor_mz2=row_dict["library_precursor_mz"]
-        )
+            precursor_mz2=row_dict["library_precursor_mz"],
+            mz_power=mz_power,           # pass through
+            intensity_power=intensity_power,
+     )
 
     import dask.bag as db
     bag = db.from_sequence(df.to_dict('records'), npartitions=npartitions)
