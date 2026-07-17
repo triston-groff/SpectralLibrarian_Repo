@@ -34,22 +34,38 @@ except ImportError:
     HAS_ENTROPY = False
     warnings.warn("spectral_entropy not installed – entropy metrics disabled")
 
-# matchms (updated for modern versions)
+# ====================== matchms import (robust version) ======================
+HAS_MATCHMS = False
+MatchmsSpectrum = None
+CosineGreedy = None
+CosineHungarian = None
+ModifiedCosineGreedy = None
+ModifiedCosineHungarian = None
+
 try:
     from matchms import Spectrum as MatchmsSpectrum
-    from matchms.similarity import (
-        CosineGreedy,
-        CosineHungarian,
-        ModifiedCosineGreedy,
-        ModifiedCosineHungarian,
-    )
+    from matchms.similarity import CosineGreedy, CosineHungarian
+
+    # Try modern names first
+    try:
+        from matchms.similarity import ModifiedCosineGreedy, ModifiedCosineHungarian
+    except ImportError:
+        # Fallback for older matchms (<= 0.31)
+        try:
+            from matchms.similarity import ModifiedCosine as _ModCos
+            ModifiedCosineGreedy = _ModCos
+            ModifiedCosineHungarian = None
+        except ImportError:
+            ModifiedCosineGreedy = None
+
     HAS_MATCHMS = True
+
 except ImportError:
-    HAS_MATCHMS = False
     warnings.warn("matchms not installed – matchms similarity methods disabled")
 
 # Dask for large-scale batch scoring
 import dask.bag as db
+
 
 # ===================================================================
 # SINGLE PAIR SCORING
@@ -57,7 +73,7 @@ import dask.bag as db
 def score_similarity(
     spec1: Dict[str, np.ndarray],
     spec2: Dict[str, np.ndarray],
-    method: Union[str, List[str]] = "modified_cosine",
+    method: Union[str, List[str]] = "modified_cosine_greedy",
     mz_tol: float = 0.1,
     precursor_diff: float = 0.0,
     precursor_mz1: float = None,
@@ -93,7 +109,7 @@ def score_similarity(
         methods = method
 
     # ------------------------------------------------------------------
-    # CUSTOM IMPLEMENTATIONS (no external dependency beyond numpy/scipy)
+    # CUSTOM IMPLEMENTATIONS
     # ------------------------------------------------------------------
     def _modified_cosine_greedy(
         q_mz, q_int, l_mz, l_int, delta, mz_tol, mz_power, intensity_power
@@ -120,7 +136,6 @@ def score_similarity(
         i_s, j_s = np.where(cost_s <= mz_tol)
         prods_s = q_w[i_s] * l_w[j_s]
 
-        # Combine all candidates
         candidates = []
         for ii, jj, pr in zip(i_d, j_d, prods_d):
             candidates.append((float(pr), int(ii), int(jj)))
@@ -130,7 +145,6 @@ def score_similarity(
         if not candidates:
             return 0.0, 0
 
-        # Greedy: highest product first, no peak reuse
         candidates.sort(key=lambda x: x[0], reverse=True)
 
         used_q, used_l = set(), set()
@@ -160,7 +174,6 @@ def score_similarity(
         if norm_q == 0 or norm_l == 0:
             return 0.0, 0
 
-        # Build assignment cost matrix (we maximize product → minimize negative)
         l_shift = l_mz + delta
         cost_direct = np.abs(q_mz[:, None] - l_mz[None, :])
         cost_shift  = np.abs(q_mz[:, None] - l_shift[None, :])
@@ -168,7 +181,6 @@ def score_similarity(
 
         prod_matrix = q_w[:, None] * l_w[None, :]
 
-        # Only consider pairs within tolerance
         assign_cost = np.where(min_cost <= mz_tol, -prod_matrix, 1e10)
 
         row_ind, col_ind = linear_sum_assignment(assign_cost)
@@ -195,7 +207,7 @@ def score_similarity(
             scores[m] = score
 
     # ------------------------------------------------------------------
-    # ENTROPY FAMILY (via spectral_entropy)
+    # ENTROPY FAMILY
     # ------------------------------------------------------------------
     if HAS_ENTROPY and any(m not in ("modified_cosine", "modified_cosine_greedy", "modified_cosine_hungarian") for m in methods):
         q_arr = np.column_stack([q_mz, q_int])
@@ -221,7 +233,7 @@ def score_similarity(
                 pass
 
     # ------------------------------------------------------------------
-    # MATCHMS VERSIONS (fixed precursor_mz handling)
+    # MATCHMS VERSIONS
     # ------------------------------------------------------------------
     if HAS_MATCHMS:
         q_meta = {"precursor_mz": precursor_mz1} if precursor_mz1 is not None else {}
@@ -230,7 +242,7 @@ def score_similarity(
         q_sp = MatchmsSpectrum(mz=q_mz, intensities=q_int, metadata=q_meta)
         l_sp = MatchmsSpectrum(mz=l_mz, intensities=l_int, metadata=l_meta)
 
-        if "matchms_cosine_greedy" in methods:
+        if "matchms_cosine_greedy" in methods and CosineGreedy is not None:
             try:
                 scores["matchms_cosine_greedy"] = CosineGreedy(
                     tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
@@ -238,7 +250,7 @@ def score_similarity(
             except Exception:
                 pass
 
-        if "matchms_cosine_hungarian" in methods:
+        if "matchms_cosine_hungarian" in methods and CosineHungarian is not None:
             try:
                 scores["matchms_cosine_hungarian"] = CosineHungarian(
                     tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
@@ -246,22 +258,15 @@ def score_similarity(
             except Exception:
                 pass
 
-        if "matchms_modified_cosine_greedy" in methods or "matchms_modified_cosine" in methods:
+        if ("matchms_modified_cosine_greedy" in methods or "matchms_modified_cosine" in methods) and ModifiedCosineGreedy is not None:
             try:
                 scores["matchms_modified_cosine_greedy"] = ModifiedCosineGreedy(
                     tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
                 ).pair(q_sp, l_sp)["score"]
             except Exception:
-                # Fallback for older matchms that only had ModifiedCosine
-                try:
-                    from matchms.similarity import ModifiedCosine
-                    scores["matchms_modified_cosine"] = ModifiedCosine(
-                        tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
-                    ).pair(q_sp, l_sp)["score"]
-                except Exception:
-                    pass
+                pass
 
-        if "matchms_modified_cosine_hungarian" in methods:
+        if "matchms_modified_cosine_hungarian" in methods and ModifiedCosineHungarian is not None:
             try:
                 scores["matchms_modified_cosine_hungarian"] = ModifiedCosineHungarian(
                     tolerance=mz_tol, mz_power=mz_power, intensity_power=intensity_power
@@ -273,7 +278,7 @@ def score_similarity(
 
 
 # ===================================================================
-# DASK-BASED BATCH SCORING – MILLIONS-SAFE
+# DASK-BASED BATCH SCORING – FIXED VERSION
 # ===================================================================
 def batch_score_similarity(
     pairs_df: Optional[pd.DataFrame] = None,
@@ -283,10 +288,10 @@ def batch_score_similarity(
     library_mz_array_col: str = "mz_array_2",
     library_intensity_array_col: str = "intensity_array_2",
     library_precursor_mz_col: str = "PRECURSORMZ_2",
-    method: Union[str, List[str]] = "modified_cosine_greedy",   # changed default
+    method: Union[str, List[str]] = "modified_cosine_greedy",
     mz_tol: float = 0.1,
-    mz_power: float = 0.0,           # NEW
-    intensity_power: float = 1.0,    # NEW
+    mz_power: float = 0.0,
+    intensity_power: float = 1.0,
     npartitions: int = 64,
     scheduler: str = "processes",
     checkpoint_file: str = "similarity_checkpoint.json",
@@ -311,18 +316,17 @@ def batch_score_similarity(
     def score_row(row_dict):
         q = {"mz": np.asarray(row_dict["query_mz"]), "intensity": np.asarray(row_dict["query_intensity"])}
         l = {"mz": np.asarray(row_dict["library_mz"]), "intensity": np.asarray(row_dict["library_intensity"])}
-    return score_similarity(
+        return score_similarity(
             q, l,
             method=method,
             mz_tol=mz_tol,
             precursor_diff=row_dict["precursor_diff"],
             precursor_mz1=row_dict["query_precursor_mz"],
             precursor_mz2=row_dict["library_precursor_mz"],
-            mz_power=mz_power,           # pass through
+            mz_power=mz_power,
             intensity_power=intensity_power,
-     )
+        )
 
-    import dask.bag as db
     bag = db.from_sequence(df.to_dict('records'), npartitions=npartitions)
     scored = bag.map(score_row)
 
@@ -340,7 +344,7 @@ def batch_score_similarity(
 
 
 # ===================================================================
-# PAIRWISE COMBINATIONS FUNCTIONS (your requested implementation)
+# PAIRWISE COMBINATIONS FUNCTIONS
 # ===================================================================
 def process_group_chunk(chunk, match_cols, dont_match_cols, tol_dict, id_col):
     n = len(chunk)
@@ -387,7 +391,7 @@ def process_group(group, match_cols, dont_match_cols, tol_dict, id_col, chunk_si
     partial_process_chunk = partial(
         process_group_chunk, 
         match_cols=match_cols, 
-        dont_match_cols=dont_match_cols, 
+        dont_match_cols= dont_match_cols, 
         tol_dict=tol_dict, 
         id_col=id_col
     )
