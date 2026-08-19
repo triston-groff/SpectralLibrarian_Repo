@@ -9,7 +9,7 @@ import time
 import pandas as pd
 import concurrent.futures
 from typing import List, Iterable, Any
-from pubchempy import Compound, get_compounds
+from pubchempy import Compound, get_compounds, get_cids
 from datetime import datetime
 
 
@@ -181,101 +181,289 @@ except ImportError:
 from rdkit import Chem
 from rdkit.Chem.rdMolDescriptors import CalcExactMolWt
 
+
 def isnull_or_empty(o: Any) -> bool:
     if o is None:
         return True
-    if pd.isna(o):
-        return True
+    try:
+        if pd.isna(o):
+            return True
+    except (ValueError, TypeError):
+        pass
     try:
         s = str(o).strip().lower()
-        if s in {"", "<na>", "n/a", "na", "nan", "nat"}:
+        if s in {"", "<na>", "n/a", "na", "nan", "nat", "none"}:
             return True
         if hasattr(o, "__len__") and len(o) == 0:
             return True
-    except:
+    except Exception:
         pass
     return False
 
 
 def _compound_score(comp: Compound) -> int:
-    """Prefer SMILES with fewer dots (less fragmented)."""
-    smiles = comp.canonical_smiles or comp.isomeric_smiles or ""
+    """Prefer SMILES with fewer dots (less fragmented). Version-proof for modern PubChemPy."""
+    smiles = (
+        getattr(comp, "smiles", None)
+        or getattr(comp, "connectivity_smiles", None)
+        or getattr(comp, "canonical_smiles", None)
+        or getattr(comp, "isomeric_smiles", None)
+        or ""
+    )
     return 1000 - smiles.count(".")
 
 
-def _search_one(query: str, field: str) -> dict | None | str:
-    if isnull_or_empty(query):
-        return None
+def _get_parent_cids(cid: int | None) -> List[int]:
+    """Fetch parent CIDs for a given CID (PubChem cids_type=parent). Returns empty list on failure."""
+    if cid is None or cid < 0:
+        return []
     try:
-        compounds = get_compounds(query, field)
+        parents = get_cids(
+            identifier=cid,
+            namespace="cid",
+            domain="compound",
+            cids_type="parent",
+        )
+        if isinstance(parents, int):
+            return [parents]
+        if isinstance(parents, (list, tuple)):
+            return [int(p) for p in parents if p is not None]
+        return []
+    except Exception:
+        return []
+
+
+def _search_one(
+    original_query: Any,
+    field: str,
+    include_synonyms: bool = True,
+    include_parents: bool = False,
+) -> dict | None | str:
+    """
+    Search a single query.
+    original_query is kept with its original Python type for the output 'query' column.
+    Internally the value is converted to str for the PubChem API.
+    """
+    if isnull_or_empty(original_query):
+        return None
+
+    query_str = str(original_query).strip()
+
+    try:
+        compounds = get_compounds(query_str, field)
         if not compounds:
             return None
+
         compounds.sort(key=_compound_score, reverse=True)
         best = compounds[0]
         result = best.to_dict()
-        result["query"] = query
+
+        # --- name + synonyms ---
+        iupac_name = result.get("iupac_name")
+        if include_synonyms:
+            try:
+                synonyms = best.synonyms or []
+                result["synonyms"] = synonyms
+                friendly_name = synonyms[0] if synonyms else None
+            except Exception:
+                friendly_name = None
+                result["synonyms"] = []
+        else:
+            friendly_name = None
+            result["synonyms"] = None
+
+        result["name"] = (
+            friendly_name
+            or iupac_name
+            or result.get("molecular_formula")
+            or query_str
+        )
+
+        # --- parents (optional extra request) ---
+        if include_parents:
+            cid = result.get("cid")
+            result["parent_cids"] = _get_parent_cids(cid)
+        else:
+            result["parent_cids"] = None
+
+        # Preserve original query value + type
+        result["query"] = original_query
         result["query_field"] = field
+
         return result
+
     except Exception as e:
         return f"Error: {str(e)}"
 
 
-def search(queries: Iterable[str], field: str = "name", max_workers: int = 5) -> pd.DataFrame:
-    return parallel_search(queries, field=field, max_workers=max_workers)
+def search(
+    queries: Iterable[Any],
+    field: str = "name",
+    max_workers: int = 5,
+    include_synonyms: bool = True,
+    include_parents: bool = False,
+) -> pd.DataFrame:
+    return parallel_search(
+        queries,
+        field=field,
+        max_workers=max_workers,
+        include_synonyms=include_synonyms,
+        include_parents=include_parents,
+    )
 
 
 def parallel_search(
-    queries: Iterable[str],
+    queries: Iterable[Any],
     field: str = "name",
     max_workers: int = 5,
     max_retries: int = 5,
+    include_synonyms: bool = True,
+    include_parents: bool = False,
 ) -> pd.DataFrame:
-    if isinstance(queries, pd.Series):
-        queries = queries.astype(str).replace(["nan", "<NA>"], None).tolist()
-    elif not isinstance(queries, list):
-        queries = list(queries)
+    """
+    Parallel PubChem search with type-preserving query column and clean dtypes.
 
-    if not queries:
+    Parameters
+    ----------
+    queries : Iterable
+        Can be list / Series of str, int, etc. Internally converted to str for the API.
+        The output 'query' column keeps the original values and their original types.
+    field : str
+        PubChem namespace ('name', 'cid', 'smiles', 'inchikey', ...)
+    max_workers : int
+        Thread pool size.
+    max_retries : int
+        Retries for 503 ServerBusy responses.
+    include_synonyms : bool
+        If True (default), fetches the full synonym list and builds a smart 'name'
+        column (first synonym preferred – matches what PubChem website usually shows).
+    include_parents : bool
+        If True, also fetches parent CIDs via cids_type=parent (extra API call per hit).
+
+    Returns
+    -------
+    pd.DataFrame
+        Missing / failed rows have cid = -1. Column order is cleaned for convenience.
+    """
+    # Keep original objects so we can put them back later (type preservation)
+    if isinstance(queries, pd.Series):
+        original_list = queries.tolist()
+    else:
+        original_list = list(queries)
+
+    if not original_list:
         return pd.DataFrame()
 
-    pending = list(queries)
-    all_results = []
+    pending_idx = list(range(len(original_list)))
+    all_results: list[dict | None] = [None] * len(original_list)
     attempt = 0
 
-    while pending and attempt < max_retries:
+    while pending_idx and attempt < max_retries:
         attempt += 1
-        print(f"PubChem query attempt {attempt}/{max_retries} – {len(pending)} remaining")
+        print(f"PubChem query attempt {attempt}/{max_retries} – {len(pending_idx)} remaining")
+
+        current_queries = [original_list[i] for i in pending_idx]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(lambda q: _search_one(q, field), pending))
+            results = list(
+                executor.map(
+                    lambda q: _search_one(
+                        q,
+                        field,
+                        include_synonyms=include_synonyms,
+                        include_parents=include_parents,
+                    ),
+                    current_queries,
+                )
+            )
 
-        retry = []
-        for query, res in zip(pending, results):
-            row = {"query": query, "query_field": field}
+        retry_idx = []
+        for idx, res in zip(pending_idx, results):
             if isinstance(res, dict):
-                row.update(res)
-                all_results.append(row)
+                all_results[idx] = res
             elif res is None:
-                all_results.append(row)
+                # No hit
+                all_results[idx] = {
+                    "query": original_list[idx],
+                    "query_field": field,
+                    "cid": -1,
+                    "name": None,
+                    "synonyms": [] if include_synonyms else None,
+                    "parent_cids": [] if include_parents else None,
+                }
             else:
-                if "503" in res and "ServerBusy" in res:
-                    retry.append(query)
+                # Error string
+                if "503" in str(res) and "ServerBusy" in str(res):
+                    retry_idx.append(idx)
                 else:
-                    row["pubchem_error"] = res
-                    all_results.append(row)
+                    all_results[idx] = {
+                        "query": original_list[idx],
+                        "query_field": field,
+                        "cid": -1,
+                        "name": None,
+                        "pubchem_error": res,
+                        "synonyms": [] if include_synonyms else None,
+                        "parent_cids": [] if include_parents else None,
+                    }
 
-        pending = retry
-        if pending:
+        pending_idx = retry_idx
+        if pending_idx:
             time.sleep(10)
 
-    for query in pending:
-        all_results.append({
-            "query": query,
+    # Any remaining after max retries
+    for idx in pending_idx:
+        all_results[idx] = {
+            "query": original_list[idx],
             "query_field": field,
-            "pubchem_error": "Max retries exceeded (503 ServerBusy)"
-        })
+            "cid": -1,
+            "name": None,
+            "pubchem_error": "Max retries exceeded (503 ServerBusy)",
+            "synonyms": [] if include_synonyms else None,
+            "parent_cids": [] if include_parents else None,
+        }
 
-    return pd.DataFrame(all_results)
+    df = pd.DataFrame(all_results)
+
+    # ---------- dtype enforcement ----------
+    if "cid" in df.columns:
+        df["cid"] = pd.to_numeric(df["cid"], errors="coerce").fillna(-1).astype("int64")
+
+    if "query_field" in df.columns:
+        df["query_field"] = df["query_field"].astype("string")
+
+    for col in [
+        "name",
+        "iupac_name",
+        "molecular_formula",
+        "smiles",
+        "connectivity_smiles",
+        "inchi",
+        "inchikey",
+        "coordinate_type",
+    ]:
+        if col in df.columns:
+            df[col] = df[col].astype("string")
+
+    # query column is intentionally left alone so original int/str types are preserved
+
+    # Nice column order
+    preferred = [
+        "query",
+        "name",
+        "cid",
+        "iupac_name",
+        "synonyms",
+        "parent_cids",
+        "query_field",
+        "molecular_formula",
+        "smiles",
+        "inchikey",
+    ]
+    existing = [c for c in preferred if c in df.columns]
+    others = [c for c in df.columns if c not in existing]
+    df = df[existing + others]
+
+    return df
 
 
 # ===================================================================
@@ -315,7 +503,7 @@ def harmonize_smiles_rdkit(
                 canon = te.Canonicalize(mol)
                 if canon:
                     mol = canon
-            except:
+            except Exception:
                 pass  # ignore tautomer failures
 
         # 3. Uncharge
@@ -349,7 +537,7 @@ def batch_harmonize_smiles(
     output_col: str = "smiles_harmonized",
     date_col: str | None = None,
     overwrite: bool = False,
-    **kwargs
+    **kwargs,
 ) -> pd.DataFrame:
     df = df.copy()
 
