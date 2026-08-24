@@ -38,8 +38,9 @@ dependencies = [
     "SpectralEntropy @ git+https://github.com/triston-groff/SpectralEntropy.git@215f94338a255103ef20701d411415b39ec02810",
     "tqdm>=4.67.1",
     "dask==2025.11.0",
+    "pyarrow>=14.0.0",
     "packaging<25.1,>=21.3",
-    "pytz<2026,>=2021.1"
+    "pytz<2026,>=2021.1",
     
 ]
 
